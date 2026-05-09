@@ -92,11 +92,44 @@ export class Link extends EventEmitter {
 	async start(): Promise<void> {
 		if (!this.salt.value) throw this.noSaltError();
 		if (this.ready) return this.ready;
-		this.ready = this.bootPeer().catch((err) => {
+		this.ready = this.bootWithRetry().catch((err) => {
 			this.ready = null;
 			throw err;
 		});
 		return this.ready;
+	}
+
+	/**
+	 * Boot the peer, retrying on UnavailableID (the broker still has our slot
+	 * registered from a prior session that didn't clean up). The PeerJS public
+	 * cloud usually frees the slot within ~30s of the WebSocket dying, so a
+	 * handful of retries with backoff covers the common case.
+	 */
+	private async bootWithRetry(): Promise<void> {
+		const delays = [3_000, 5_000, 10_000, 15_000, 20_000];
+		let lastErr: Error | null = null;
+		for (let attempt = 0; attempt <= delays.length; attempt++) {
+			try {
+				await this.bootPeer();
+				return;
+			} catch (err: any) {
+				const msg = err?.message ?? String(err);
+				const isTaken =
+					(err as any)?.type === "unavailable-id" ||
+					/unavailable[- ]id|is taken|ID["' ].*taken/i.test(msg);
+				lastErr = err instanceof Error ? err : new Error(String(err));
+				if (!isTaken || attempt === delays.length) throw lastErr;
+				// Tear down the half-booted peer before retrying so we get a clean
+				// WebSocket on the next attempt.
+				try {
+					this.peer?.destroy();
+				} catch {}
+				this.peer = null;
+				const wait = delays[attempt];
+				await new Promise((r) => setTimeout(r, wait));
+			}
+		}
+		throw lastErr ?? new Error("bootWithRetry exhausted");
 	}
 
 	private async bootPeer(): Promise<void> {

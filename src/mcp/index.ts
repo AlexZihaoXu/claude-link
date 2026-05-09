@@ -317,6 +317,32 @@ export async function run(): Promise<void> {
 		);
 	}
 
+	// Graceful shutdown so the broker drops our slot the moment claude (our
+	// parent) exits. Without this, the next claude-link session with the same
+	// session-id will get UnavailableID until the broker times the stale
+	// registration out — which can take 30s+ on the public cloud.
+	let shuttingDown = false;
+	const shutdown = (signal: string) => {
+		if (shuttingDown) return;
+		shuttingDown = true;
+		if (result.ok) {
+			void result.data.link
+				.stop()
+				.catch(() => {})
+				.finally(() => process.exit(0));
+		} else {
+			process.exit(0);
+		}
+		// Hard-exit fallback if stop() hangs (shouldn't, but defensive).
+		setTimeout(() => process.exit(0), 1500).unref();
+	};
+	process.on("SIGINT", () => shutdown("SIGINT"));
+	process.on("SIGTERM", () => shutdown("SIGTERM"));
+	process.on("SIGHUP", () => shutdown("SIGHUP"));
+	// Stdin closing means our parent (claude) is gone.
+	process.stdin.on("end", () => shutdown("stdin-end"));
+	process.stdin.on("close", () => shutdown("stdin-close"));
+
 	const transport = new StdioServerTransport();
 	await server.connect(transport);
 }
