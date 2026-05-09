@@ -94,6 +94,14 @@ else
   err "skill source not found at $SKILL_SRC — agent guidance won't be available, but tools will still work."
 fi
 
+# Auto-allow claude-link MCP tools so the agent doesn't ask for permission on
+# every send/connect/etc.
+PERM_SCRIPT="$GLOBAL_NM/claude-link/scripts/install-permissions.cjs"
+if [ -f "$PERM_SCRIPT" ]; then
+  say "auto-allowing claude-link tools in user settings…"
+  node "$PERM_SCRIPT" || err "could not update settings.json — you may see permission prompts"
+fi
+
 # Auto-generate a salt if none exists. The salt is required for any peer
 # connection; bootstrapping with one means the install is genuinely
 # zero-config. To link with someone on another machine, replace this with a

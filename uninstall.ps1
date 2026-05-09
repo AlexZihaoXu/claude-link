@@ -26,6 +26,23 @@ if (Test-Path $SkillDst) {
     Remove-Item -Recurse -Force $SkillDst
 }
 
+# Best-effort: clean the permissions.allow entries.
+if (Get-Command node -ErrorAction SilentlyContinue) {
+    $script = @'
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
+const p = process.env.CLAUDE_SETTINGS_PATH || path.join(os.homedir(), '.claude', 'settings.json');
+let s; try { s = JSON.parse(fs.readFileSync(p, 'utf8')); } catch { process.exit(0); }
+if (!s.permissions || !Array.isArray(s.permissions.allow)) process.exit(0);
+s.permissions.allow = s.permissions.allow.filter(e => typeof e !== 'string' || !e.startsWith('mcp__claude-link__'));
+if (s.permissions.allow.length === 0) delete s.permissions.allow;
+if (Object.keys(s.permissions).length === 0) delete s.permissions;
+fs.writeFileSync(p, JSON.stringify(s, null, 2) + '\n');
+'@
+    node -e $script 2>$null | Out-Null
+}
+
 Write-Ok "claude-link uninstalled."
 $SaltPath = try { (claude-link config path) 2>$null } catch { '~/.config/claude-link/salt' }
 Write-Host "Salt file (kept; remove manually if you want): $SaltPath"

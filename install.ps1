@@ -102,6 +102,16 @@ if (Test-Path $SkillSrc) {
     Write-Err "skill source not found at $SkillSrc - agent guidance won't be available, but tools will still work."
 }
 
+# Auto-allow claude-link MCP tools so the agent doesn't ask for permission.
+$PermScript = Join-Path $GlobalNm 'claude-link\scripts\install-permissions.cjs'
+if (Test-Path $PermScript) {
+    Write-Say "auto-allowing claude-link tools in user settings..."
+    node $PermScript
+    if ($LASTEXITCODE -ne 0) {
+        Write-Err "could not update settings.json - you may see permission prompts"
+    }
+}
+
 # Auto-generate a salt if none exists.
 $SaltFile = (claude-link-config path).Trim()
 $NeedsSalt = -not (Test-Path $SaltFile -PathType Leaf) -or (Get-Item $SaltFile).Length -eq 0
