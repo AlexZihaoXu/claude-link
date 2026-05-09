@@ -8,12 +8,25 @@ the agent code alone is not enough for a stranger to find you.
 ## Install
 
 ```sh
-# POSIX (macOS / Linux):
+# macOS / Linux:
 curl -fsSL https://raw.githubusercontent.com/AlexZihaoXu/claude-link/main/install.sh | bash
 
 # Windows (PowerShell):
 irm https://raw.githubusercontent.com/AlexZihaoXu/claude-link/main/install.ps1 | iex
 ```
+
+## Uninstall
+
+```sh
+# macOS / Linux:
+curl -fsSL https://raw.githubusercontent.com/AlexZihaoXu/claude-link/main/uninstall.sh | bash
+
+# Windows (PowerShell):
+irm https://raw.githubusercontent.com/AlexZihaoXu/claude-link/main/uninstall.ps1 | iex
+```
+
+To keep your salt or inbox during uninstall: prefix with `KEEP_SALT=1`
+and/or `KEEP_INBOX=1` (POSIX) or set the env vars before piping (Windows).
 
 The installer:
 1. `bun install -g github:AlexZihaoXu/claude-link` — installs the package.
