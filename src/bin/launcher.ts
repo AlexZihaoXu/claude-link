@@ -3,6 +3,7 @@ import * as pty from "node-pty";
 import { loadSalt, saltPreview } from "../config/salt";
 import { newIpcAddress, IPC_ENV_ADDR, IPC_ENV_TOKEN } from "../util/ipc-protocol";
 import { IpcServer } from "../wrapper/ipc-server";
+import { which } from "../util/which";
 
 /**
  * Pure passthrough launcher. Spawns `claude` in a PTY and proxies stdin /
@@ -19,7 +20,10 @@ async function main() {
 	const salt = await loadSalt();
 	const ipc = newIpcAddress();
 
-	const claudeBin = process.env.CLAUDE_LINK_CLAUDE_BIN || "claude";
+	const claudeBinName = process.env.CLAUDE_LINK_CLAUDE_BIN || "claude";
+	// node-pty's spawn does not honor PATHEXT on Windows the way the OS shell
+	// does, so resolve `claude` → `claude.exe` (or `.cmd` etc.) explicitly.
+	const claudeBin = which(claudeBinName) ?? claudeBinName;
 	const cwd = process.cwd();
 
 	const env: NodeJS.ProcessEnv = {
@@ -37,6 +41,18 @@ async function main() {
 	const rows = process.stdout.rows ?? 24;
 	const isTty = !!process.stdout.isTTY;
 
+	// If `which` couldn't resolve and the user didn't override, fail fast with a
+	// clear message instead of letting node-pty surface a cryptic
+	// "File not found:" error.
+	if (claudeBin === claudeBinName && which(claudeBinName) === null) {
+		process.stderr.write(
+			`claude-link: \`${claudeBinName}\` not found on PATH.\n` +
+				`  Install Claude Code first (https://claude.com/code), or override the binary with:\n` +
+				`    CLAUDE_LINK_CLAUDE_BIN=/full/path/to/claude claude-link\n`,
+		);
+		process.exit(127);
+	}
+
 	let term: pty.IPty;
 	try {
 		term = pty.spawn(claudeBin, args, {
@@ -47,12 +63,6 @@ async function main() {
 			env: env as Record<string, string>,
 		});
 	} catch (err: any) {
-		if (err?.code === "ENOENT") {
-			process.stderr.write(
-				`claude-link: \`${claudeBin}\` not found on PATH. Install Claude Code first, or set CLAUDE_LINK_CLAUDE_BIN.\n`,
-			);
-			process.exit(127);
-		}
 		process.stderr.write(`claude-link: failed to spawn ${claudeBin}: ${err?.message ?? err}\n`);
 		process.exit(1);
 	}
