@@ -249,10 +249,17 @@ function startIpcServer({ addr, token, onInject }) {
 		} catch {}
 	}
 	process.stdin.resume();
+	const debugInput = process.env.CLAUDE_LINK_DEBUG_INPUT === "1";
 	// Forward stdin as raw bytes — converting Buffer → utf8 string can mangle
 	// control bytes (e.g. backspace 0x7f gets misinterpreted, which is why
 	// Backspace on Git Bash was acting like Ctrl+W / "delete word").
 	process.stdin.on("data", (chunk) => {
+		if (debugInput) {
+			const hex = Array.from(chunk)
+				.map((b) => b.toString(16).padStart(2, "0"))
+				.join(" ");
+			process.stderr.write(`[stdin] ${hex}\n`);
+		}
 		try {
 			term.write(chunk);
 		} catch {}
@@ -265,12 +272,16 @@ function startIpcServer({ addr, token, onInject }) {
 	//                mode where Backspace is just 0x7f and works correctly.
 	//   \x1b[?1004h — focus events on. Not strictly needed and produces
 	//                stray escape sequences when the terminal gains/loses focus.
-	// We only strip the ENABLES; claude can still send the disables on exit and
-	// the terminal-reset block in our exit handler covers anything left over.
 	const STRIP = /\x1b\[\?(?:9001|1004)h/g;
+	const debugOutput = process.env.CLAUDE_LINK_DEBUG_OUTPUT === "1";
 	term.onData((data) => {
+		// .replace handles repeat occurrences and resets lastIndex correctly.
+		const cleaned = data.replace(STRIP, "");
+		if (debugOutput && cleaned !== data) {
+			process.stderr.write(`[stripped mode-enable from PTY output]\n`);
+		}
 		try {
-			process.stdout.write(STRIP.test(data) ? data.replace(STRIP, "") : data);
+			process.stdout.write(cleaned);
 		} catch {}
 	});
 
