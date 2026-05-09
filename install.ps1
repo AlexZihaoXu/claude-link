@@ -21,6 +21,10 @@ if (-not (Get-Command bun -ErrorAction SilentlyContinue)) {
     Write-Err "bun not found on PATH. Install it from https://bun.sh first."
     exit 1
 }
+if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
+    Write-Err "node not found on PATH. Install Node.js (>=18) first: https://nodejs.org"
+    exit 1
+}
 if (-not (Get-Command claude -ErrorAction SilentlyContinue)) {
     Write-Err "claude not found on PATH. Install Claude Code first: https://claude.com/code"
     exit 1
@@ -36,12 +40,26 @@ if ((Test-Path $BunBin) -and ($env:PATH -notlike "*$BunBin*")) {
     $env:PATH = "$BunBin;$env:PATH"
 }
 
-$ClaudeLink = Get-Command claude-link -ErrorAction SilentlyContinue
-if (-not $ClaudeLink) {
-    Write-Err "claude-link not on PATH after install."
+$ClaudeLinkMcp = Get-Command claude-link-mcp -ErrorAction SilentlyContinue
+if (-not $ClaudeLinkMcp) {
+    Write-Err "claude-link-mcp not on PATH after install."
     Write-Err "Bun's global bin is usually at $BunBin. Add it to your PATH and re-run."
     exit 1
 }
+
+# The launcher runs on Node, not Bun. Drop a .cmd wrapper.
+$LauncherCjs = Join-Path $GlobalNm 'claude-link\dist\launcher.cjs'
+if (-not (Test-Path $LauncherCjs)) {
+    Write-Err "missing launcher at $LauncherCjs - install is broken."
+    exit 1
+}
+$WrapperCmd = Join-Path $BunBin 'claude-link.cmd'
+Write-Say "creating claude-link launcher wrapper at $WrapperCmd..."
+$Lines = @(
+    '@echo off'
+    "node `"$LauncherCjs`" %*"
+)
+Set-Content -Path $WrapperCmd -Value $Lines -Encoding ascii
 
 # node-datachannel + node-pty native binary fallback if Bun didn't run the postinstall.
 $GlobalNm = Join-Path (Split-Path $BunBin -Parent) 'install\global\node_modules'

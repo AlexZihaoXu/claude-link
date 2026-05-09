@@ -21,7 +21,10 @@ if ! command -v bun >/dev/null 2>&1; then
   err "bun not found on PATH. Install it from https://bun.sh first."
   exit 1
 fi
-
+if ! command -v node >/dev/null 2>&1; then
+  err "node not found on PATH. Install Node.js (>=18) first: https://nodejs.org"
+  exit 1
+fi
 if ! command -v claude >/dev/null 2>&1; then
   err "claude not found on PATH. Install Claude Code first: https://claude.com/code"
   exit 1
@@ -36,12 +39,26 @@ if [ -d "$BUN_BIN" ] && [[ ":$PATH:" != *":$BUN_BIN:"* ]]; then
   export PATH="$BUN_BIN:$PATH"
 fi
 
-if ! command -v claude-link >/dev/null 2>&1; then
-  err "\`claude-link\` not on PATH after install."
+if ! command -v claude-link-mcp >/dev/null 2>&1; then
+  err "\`claude-link-mcp\` not on PATH after install."
   err "Bun's global bin is usually at $BUN_BIN. Add it to your shell rc:"
   err "  export PATH=\"$BUN_BIN:\$PATH\""
   exit 1
 fi
+
+# The launcher itself is NOT a Bun bin — it has to run on Node (Bun + node-pty
+# is unstable on Windows). Drop a wrapper script that calls Node directly.
+LAUNCHER_CJS="$GLOBAL_NM/claude-link/dist/launcher.cjs"
+if [ ! -f "$LAUNCHER_CJS" ]; then
+  err "missing launcher at $LAUNCHER_CJS — install is broken."
+  exit 1
+fi
+say "creating claude-link launcher wrapper at $BUN_BIN/claude-link…"
+cat > "$BUN_BIN/claude-link" <<EOF
+#!/usr/bin/env bash
+exec node "$LAUNCHER_CJS" "\$@"
+EOF
+chmod +x "$BUN_BIN/claude-link"
 
 # Native binary fallback for node-datachannel and node-pty: bun's trustedDependencies
 # isn't always honored on github installs. Run prebuild-install if any binary is missing.

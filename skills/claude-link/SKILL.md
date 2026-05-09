@@ -1,59 +1,80 @@
 ---
 name: claude-link
-description: Peer-to-peer messaging between Claude Code sessions. Use whenever the user asks about your "link id" / "link code" / "agent code", asks you to talk to / connect to / send a message to another agent (typically referenced by a 6-character A-Z 0-9 code like K3J9PR), wants to coordinate with another Claude session, or any time a peer might have just sent you something. The MCP server is named "claude-link" and exposes link_whoami / link_connect / link_send / link_inbox / link_peers / link_set_name.
+description: Peer-to-peer messaging between Claude Code sessions over WebRTC. Engage this skill any time the user asks about your "link id" / "linkid" / "link code" / "agent code", asks you to "talk to" / "connect to" / "send to" / "ping" / "ask" another agent, mentions a 6-character A-Z 0-9 code (e.g. K3J9PR, SDPNE7), wants to coordinate with another Claude session, asks "any messages?" / "check my inbox" / "anything from <code>?", OR at the start of any session where the user might be expecting peer activity. The MCP server is named "claude-link" and exposes link_whoami / link_connect / link_send / link_inbox / link_peers / link_set_name. Inbox messages must be surfaced verbatim using the format `[Link | Agent=<CODE>]: <text>`.
 ---
 
 # claude-link — peer-to-peer messaging between Claude Code sessions
 
-claude-link connects two Claude Code sessions (possibly on different machines) over WebRTC P2P. Each session has a deterministic 6-character **agent code** (also called "link code" or "link id") derived from its Claude Code session id.
+## What it is
 
-## When to engage this skill
+claude-link connects two Claude Code sessions (possibly on different machines) over WebRTC P2P. Each session has a deterministic 6-character **agent code** derived from its session id. Two agents using the same shared salt can find each other on the public PeerJS broker and exchange messages.
 
-- The user asks "what's your link id / link code / agent code".
-- The user asks you to "connect to", "talk to", "ping", or "send to" another agent — often handing you a 6-character code like `K3J9PR`.
-- A peer message has arrived (a `[link from <name>]` line, or you suspect `link_inbox` may have something queued).
-- The user wants to coordinate work with another Claude session.
+## When to engage
 
-If the user mentions "linkid" or "link id" with no other context — they almost certainly mean your link code, NOT LinkedIn. Call `link_whoami`.
+- "what's your link id / linkid / link code / agent code" — call `link_whoami` and answer.
+- The user gives you a 6-char code (`K3J9PR`, `SDPNE7`, `5GQDRV`, etc.) and wants you to "talk to" / "connect to" / "send to" / "ping" / "tell" / "ask" them — use `link_connect` then `link_send`.
+- "check inbox", "any messages?", "anything new from X", "is anyone connected" — call `link_inbox` and `link_peers`.
+- A message in the format `[Link | Agent=<CODE>]: ...` appears in your context — that's a peer message you may want to reply to.
 
-## Tools (provided by the `claude-link` MCP server)
+If "linkid" appears with no LinkedIn / social-media context — assume it means **link code**, not LinkedIn.
 
-| Tool | What it does | When to call |
+## On first link interaction (do this every time)
+
+1. Call `link_whoami` — it returns `code`, `salt`, `ready`, `inboxFilePath`, etc.
+2. If `ready: false` (no salt), tell the user to run `claude-link-config set <a long random string>` and stop.
+3. Call `link_inbox` once — drain anything that queued up since you were last touched.
+4. **Arm a `Monitor` tool on the `inboxFilePath`.** This is what makes you wake up when a peer messages you while idle. The Monitor command should be:
+
+   ```
+   tail -f -n 0 "<inboxFilePath>"
+   ```
+
+   Each new line that the Monitor emits is a fresh inbox entry; that wakes you, and you should immediately call `link_inbox` to drain and act on it.
+5. Now you're reachable AND responsive. Continue with whatever the user asked.
+
+## Surfacing peer messages — required format
+
+When you drain `link_inbox` and find a `kind: "msg"` entry, surface it to the user verbatim, on its own line, in this exact format:
+
+```
+[Link | Agent=<CODE>]: <text>
+```
+
+Use the `from` field for `<CODE>` and the `text` field for `<text>`. Do this BEFORE doing anything else with the message — the user wants to see what came in.
+
+For `kind: "system"` entries (peer connected/disconnected, signaling reconnect, etc.), surface as:
+
+```
+[Link event] <text>
+```
+
+These are FYI only. Do NOT reply to system events with `link_send`.
+
+## Tools
+
+| Tool | What it does | When |
 |---|---|---|
-| `link_whoami` | Returns your code, name, salt status, inbox file path. Also kicks off peer registration on the signaling network. | **First** — always call this once at the start of any link conversation. Until any link_* tool runs, your code is unreachable from the outside. |
-| `link_set_name(name)` | Set a friendly display name peers see. | After `link_whoami` if no name is set; pick a short fun name. |
-| `link_connect(code)` | Open a P2P connection to another agent by their 6-char code. | When the user gives you a code to reach. |
-| `link_send(code, text)` | Send text to a connected peer. | When you have something substantive to say and there's an active connection. |
-| `link_inbox` | Drain pending messages + system events. | At the start of any link-related turn; whenever the user asks you to check for messages; right after you call `link_whoami` if you've been away. |
-| `link_peers` | List current connections. | When the user asks who you're connected to. |
+| `link_whoami` | Returns code, salt status, inbox path. Kicks off peer registration. | First action of any link conversation. |
+| `link_set_name(name)` | Sets your display name peers see. | Optional, after first link_whoami. |
+| `link_connect(code)` | Opens a connection to another agent. | When the user gives you a code to reach. |
+| `link_send(code, text)` | Sends text to a connected peer. | When you have something substantive to say. |
+| `link_inbox` | Drains pending messages + events. | Every time you're triggered while link is in scope; called by your Monitor on every new line. |
+| `link_peers` | Lists current connections. | When the user asks who you're connected to. |
 
-## How to receive messages
+## Etiquette for cross-agent talk
 
-Messages from peers don't auto-inject into your turn. There are two ways to surface them:
-
-1. **Polling (always works)** — call `link_inbox` at the start of any link conversation, or whenever the user mentions checking for new traffic.
-2. **Idle wake-up (recommended for active conversations)** — `link_whoami` returns an `inboxFilePath`. Arm a `Monitor` tool watching that path; each new line wakes you, then call `link_inbox` to drain. Use this when the user wants you to be responsive to a peer mid-session.
-
-Inbox entries come in two flavors. Both are JSON objects with `{from, fromName, text, ts, kind}`:
-
-- `kind: "msg"` — a peer agent sent you a message. Reply via `link_send` if substantive.
-- `kind: "system"` — a notification from the link itself (peer connected/disconnected, signaling reconnected, etc.). **Do NOT reply via link_send** to system events — they're FYI for you to mention to the user if relevant.
-
-## Etiquette when talking to other agents
-
-- **Don't reply to acks** ("thanks", "ok", "got it", "understood"). They end the exchange; replying just bounces another ack and creates a politeness loop.
+- **Don't reply to acks.** "thanks" / "ok" / "got it" / "understood" end the exchange. Replying just bounces another ack and creates a politeness loop.
 - **Silence is valid.** If the exchange reached a natural close, stop calling `link_send`.
-- **Don't repeat yourself.** If you already sent the same content in your previous turn, don't send it again.
-- Treat the link as **async coordination, not chat**. Send only when something substantive needs to cross.
+- **Don't repeat yourself.** If you already sent the same content last turn, don't send it again.
+- Treat the link as **async coordination**, not chat. Send only when something substantive needs to cross.
 
 ## Identity model
 
-- **session-id** (UUID) → **agent code** (6 chars, deterministic) → **PeerJS broker id** (sha256 of `salt | code`).
-- The salt is the shared secret that namespaces a peer group. Both ends must use the same salt; otherwise their broker ids won't match and they can't reach each other.
-- If `link_whoami` reports `salt: "none"` or `ready: false`, no salt is configured. Tell the user to run `claude-link-config set <a long random string>` (or set env var `CLAUDE_LINK_SALT`) and to share that salt with their peer out of band.
+- session-id (UUID) → agent code (6 chars, deterministic) → PeerJS broker id (sha256 of `salt | code`).
+- The salt is the shared secret. Both ends must use the same salt out of band.
 
 ## Common failure modes
 
-- **`link_connect` times out** — most likely the OTHER agent hasn't called any link_* tool since starting, so they aren't on the signaling network. Ask the user to make sure the other Claude session ran `link_whoami` (or any other link tool) at least once.
-- **Salt mismatch** — both ends must have the EXACT same salt. Check `link_whoami` `salt: "env" | "file"` on both ends.
-- **`link_send` says "not connected to X"** — the connection dropped. Call `link_connect` again first.
+- **`link_connect` times out** — the OTHER agent hasn't called any link_* tool since starting, so they aren't on the signaling network. Ask the user to make sure the other Claude session called `link_whoami` (or any link_ tool) at least once.
+- **Salt mismatch** — both ends must have the EXACT same salt. Compare `link_whoami`'s `salt` field on both ends.
+- **`link_send` says "not connected to X"** — the connection dropped. Call `link_connect` again.

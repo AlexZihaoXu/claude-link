@@ -1,17 +1,17 @@
 {
   "name": "claude-link",
-  "version": "0.0.6",
+  "version": "0.0.7",
   "description": "P2P bridge between two Claude Code sessions over WebRTC",
   "type": "module",
-  "main": "src/bin/launcher.ts",
+  "main": "dist/launcher.cjs",
   "bin": {
-    "claude-link": "src/bin/launcher.ts",
     "claude-link-mcp": "src/bin/mcp.ts",
     "claude-link-config": "src/bin/config.ts",
     "claude-link-id": "src/bin/id.ts"
   },
   "files": [
     "src",
+    "dist",
     "skills",
     "install.sh",
     "install.ps1",
@@ -22,7 +22,7 @@
     "PROJECT-STRUCTURE.md"
   ],
   "scripts": {
-    "dev": "bun run src/bin/launcher.ts",
+    "dev": "node dist/launcher.cjs",
     "e2e:peer": "bun run scripts/e2e-peer.ts",
     "e2e:mcp": "bun run scripts/e2e-mcp.ts",
     "e2e:inject": "bun run scripts/e2e-inject.ts",
@@ -33,13 +33,15 @@
   },
   "license": "MIT",
   "engines": {
-    "bun": ">=1.3.0"
+    "bun": ">=1.3.0",
+    "node": ">=18.0.0"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@msgpack/msgpack": "^2.8.0",
     "eventemitter3": "^4.0.7",
     "node-datachannel": "^0.32.3",
+    "node-pty": "^1.1.0",
     "peerjs-js-binarypack": "^2.1.0",
     "ws": "^8.20.0"
   },
@@ -49,6 +51,7 @@
     "typescript": "^5.0.0"
   },
   "trustedDependencies": [
-    "node-datachannel"
+    "node-datachannel",
+    "node-pty"
   ]
 }

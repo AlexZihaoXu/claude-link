@@ -9,6 +9,12 @@ if command -v claude >/dev/null 2>&1; then
   claude mcp remove --scope user claude-link >/dev/null 2>&1 || true
 fi
 
+BUN_BIN="${BUN_INSTALL:-$HOME/.bun}/bin"
+if [ -f "$BUN_BIN/claude-link" ]; then
+  say "removing claude-link launcher wrapper…"
+  rm -f "$BUN_BIN/claude-link"
+fi
+
 if command -v bun >/dev/null 2>&1; then
   say "removing global package…"
   bun remove -g claude-link 2>/dev/null || true

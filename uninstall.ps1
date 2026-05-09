@@ -8,6 +8,13 @@ if (Get-Command claude -ErrorAction SilentlyContinue) {
     claude mcp remove --scope user claude-link 2>$null | Out-Null
 }
 
+$BunBin = if ($env:BUN_INSTALL) { Join-Path $env:BUN_INSTALL 'bin' } else { Join-Path $env:USERPROFILE '.bun\bin' }
+$WrapperCmd = Join-Path $BunBin 'claude-link.cmd'
+if (Test-Path $WrapperCmd) {
+    Write-Say "removing claude-link launcher wrapper..."
+    Remove-Item $WrapperCmd
+}
+
 if (Get-Command bun -ErrorAction SilentlyContinue) {
     Write-Say "removing global package..."
     bun remove -g claude-link 2>$null | Out-Null
