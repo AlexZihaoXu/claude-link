@@ -322,57 +322,69 @@ function startIpcServer({ addr, token, onInject }) {
 	const INJECT_SUBMIT_DELAY_MS = parseInt(process.env.CLAUDE_LINK_INJECT_SUBMIT_DELAY_MS || "", 10) || 60;
 	const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-	// ---- WIP-protect: capture/erase/restore the user's in-progress typing ----
-	// We mirror the user's input field by tracking every keystroke that flows
-	// through stdin. When a peer message arrives mid-typing, we erase the
-	// claude input field via N backspaces (matching mirrored length), inject
-	// the peer message + Enter, then restore the WIP text plus anything the
-	// user typed during the inject window.
-	let userBuffer = "";
+	// ---- WIP-protect via raw-event replay ----
+	// Instead of tracking text content (which can't reconstruct cursor moves,
+	// arrow-key edits, paste sequences, etc.), we record the raw byte chunks
+	// the user pressed since their last submit. On peer-message inject, we:
+	//   1. Snapshot the recorded events
+	//   2. Clear claude's input (Ctrl+U + backspace flood — covers any TUI binding)
+	//   3. Inject the peer message + Enter
+	//   4. Replay the snapshotted events verbatim — claude's TUI re-runs the
+	//      exact same input, reaching the same internal state (cursor position
+	//      and all). Anything the user typed during the inject window is
+	//      replayed afterward in the order it was typed.
+	let keyEvents = []; // Buffer[] of chunks since last submit
 	let injectActive = false;
-	let queuedDuringInject = "";
+	let queuedDuringInject = []; // Buffer[] of chunks typed during inject
 
-	// Update userBuffer to reflect a chunk that's about to be (or was just)
-	// forwarded to the PTY. Best-effort: handles printable chars, Backspace,
-	// Ctrl+U, Ctrl+W, Enter (clears as submit). Skips escape sequences and
-	// other control chars (cursor moves, mouse, etc.) so cursor-edited text
-	// won't restore byte-perfectly — but the bytes will be there.
-	function trackUserBuffer(buf) {
+	function chunkContainsSubmit(buf) {
+		// \r or \n anywhere in the chunk counts as a submit. Ignore inside
+		// escape sequences (0x1b leader) — those aren't user text.
+		if (!buf || buf.length === 0) return false;
+		if (buf[0] === 0x1b) return false;
+		for (let i = 0; i < buf.length; i++) {
+			if (buf[i] === 0x0d || buf[i] === 0x0a) return true;
+		}
+		return false;
+	}
+
+	// Record one chunk into the rolling keyEvents log. If it contains a
+	// submit, it ends the recording window (next keystroke starts a fresh log).
+	function recordKeyEvent(buf) {
 		if (!buf || buf.length === 0) return;
-		if (buf[0] === 0x1b) return; // skip escape sequences entirely
-		const s = buf.toString("utf8");
-		for (const ch of s) {
-			const code = ch.codePointAt(0);
-			if (ch === "\r" || ch === "\n") {
-				userBuffer = ""; // submitted (\r) or newline-as-submit
-			} else if (code === 0x7f || code === 0x08) {
-				userBuffer = userBuffer.slice(0, -1); // backspace
-			} else if (code === 0x15) {
-				userBuffer = ""; // Ctrl+U: kill line
-			} else if (code === 0x17) {
-				userBuffer = userBuffer.replace(/\s*\S+\s*$/, ""); // Ctrl+W: kill word
-			} else if (code < 0x20 || code === 0x7f) {
-				// Other controls: leave buffer as-is (best-effort).
-			} else {
-				userBuffer += ch;
+		if (chunkContainsSubmit(buf)) {
+			keyEvents = [];
+			return;
+		}
+		keyEvents.push(buf);
+	}
+
+	// Write a (possibly large) string to the PTY using the same chunk+pace
+	// logic as inject — used for both the peer message and the replay.
+	async function writePaced(s) {
+		if (!s) return;
+		const len = typeof s === "string" ? s.length : s.byteLength;
+		if (len <= INJECT_CHUNK_BYTES) {
+			term.write(s);
+			return;
+		}
+		for (let i = 0; i < len; i += INJECT_CHUNK_BYTES) {
+			const slice = typeof s === "string" ? s.slice(i, i + INJECT_CHUNK_BYTES) : s.slice(i, i + INJECT_CHUNK_BYTES);
+			term.write(slice);
+			if (i + INJECT_CHUNK_BYTES < len) {
+				await sleep(INJECT_CHUNK_DELAY_MS);
 			}
 		}
 	}
 
-	// Write a (possibly large) string to the PTY using the same chunk+pace
-	// logic as inject — used for both the peer message and the WIP restore.
-	async function writePaced(s) {
-		if (!s) return;
-		if (s.length <= INJECT_CHUNK_BYTES) {
-			term.write(s);
-			return;
-		}
-		for (let i = 0; i < s.length; i += INJECT_CHUNK_BYTES) {
-			term.write(s.slice(i, i + INJECT_CHUNK_BYTES));
-			if (i + INJECT_CHUNK_BYTES < s.length) {
-				await sleep(INJECT_CHUNK_DELAY_MS);
-			}
-		}
+	// Empty claude's input regardless of cursor position. Ctrl+U kills the
+	// line in most TUIs; we follow with a backspace flood as belt-and-
+	// suspenders in case Ctrl+U didn't catch everything (or the cursor was
+	// past where Ctrl+U cleared from).
+	async function clearClaudeInput() {
+		const CLEAR_FLOOD = 1024; // upper bound — claude's input rarely exceeds this
+		await writePaced("\x15" + "\x7f".repeat(CLEAR_FLOOD));
+		await sleep(30);
 	}
 
 	async function injectPaced(bytes) {
@@ -385,18 +397,16 @@ function startIpcServer({ addr, token, onInject }) {
 		const body = m ? m[1] : bytes;
 		const hasSubmit = !!m;
 
-		// 1. Save WIP and pause user-stdin forwarding.
+		// 1. Save the recorded key events and pause user-stdin forwarding.
 		injectActive = true;
-		const saved = userBuffer;
-		queuedDuringInject = "";
+		const savedEvents = keyEvents.slice();
+		keyEvents = [];
+		queuedDuringInject = [];
 
 		try {
-			// 2. Erase claude's input field by sending one backspace per
-			//    mirrored character. Using \x7f (DEL) which is what claude's
-			//    TUI treats as plain Backspace.
-			if (saved.length > 0) {
-				await writePaced("\x7f".repeat([...saved].length));
-				await sleep(20);
+			// 2. Empty claude's input field if there was anything queued.
+			if (savedEvents.length > 0) {
+				await clearClaudeInput();
 			}
 
 			// 3. Write peer body in paced chunks.
@@ -406,26 +416,35 @@ function startIpcServer({ addr, token, onInject }) {
 			if (hasSubmit) {
 				await sleep(INJECT_SUBMIT_DELAY_MS);
 				term.write("\r");
-				// Brief settle so claude finishes processing the submit before
-				// we re-write the WIP into the now-empty input.
-				await sleep(80);
+				await sleep(80); // settle so claude finishes processing submit
 			}
 
-			// 5. Restore: saved WIP + anything the user typed during inject.
-			const restored = saved + queuedDuringInject;
-			if (restored) {
-				await writePaced(restored);
+			// 5. Replay the user's recorded events verbatim — same byte stream
+			//    claude would have seen if no inject happened, so cursor moves
+			//    and edits land identically.
+			for (const ev of savedEvents) {
+				term.write(ev);
+				await sleep(5);
 			}
 
-			// 6. Recompute userBuffer to reflect the restore. Replay what the
-			//    user typed during inject through the same tracker so things
-			//    like a Backspace they pressed get applied.
-			userBuffer = saved;
-			if (queuedDuringInject) {
-				trackUserBuffer(Buffer.from(queuedDuringInject, "utf8"));
+			// 6. Replay anything the user typed during the inject window
+			//    (queued, not forwarded). Order is preserved.
+			for (const ev of queuedDuringInject) {
+				term.write(ev);
+				await sleep(5);
+				// Mid-inject events that contain a submit reset our log mid-replay.
+				if (chunkContainsSubmit(ev)) {
+					savedEvents.length = 0;
+				}
 			}
+
+			// 7. Restore the keyEvents log so future injects see the right state.
+			//    savedEvents may have been reset above by a mid-replay submit.
+			keyEvents = savedEvents.concat(
+				queuedDuringInject.filter((ev) => !chunkContainsSubmit(ev)),
+			);
 		} finally {
-			queuedDuringInject = "";
+			queuedDuringInject = [];
 			injectActive = false;
 		}
 	}
@@ -475,14 +494,14 @@ function startIpcServer({ addr, token, onInject }) {
 				.join(" ");
 			process.stderr.write(`[stdin] ${hex}\n`);
 		}
-		// During an active inject, hold the user's keystrokes so they don't
-		// interleave with the peer message body. They'll be replayed after the
-		// inject and WIP-restore complete.
+		// During an active inject, hold the raw chunks so they don't interleave
+		// with the peer message body. They get replayed verbatim after the
+		// inject completes (in order, after the saved pre-inject events).
 		if (injectActive) {
-			queuedDuringInject += fixed.toString("utf8");
+			queuedDuringInject.push(fixed);
 			return;
 		}
-		trackUserBuffer(fixed);
+		recordKeyEvent(fixed);
 		try {
 			term.write(fixed);
 		} catch {}
