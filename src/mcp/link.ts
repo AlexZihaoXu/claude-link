@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { appendFileSync, mkdirSync } from "node:fs";
+import { appendFileSync, closeSync, mkdirSync, openSync } from "node:fs";
 import { dirname, join } from "node:path";
 import {
 	Peer as RawPeer,
@@ -66,8 +66,11 @@ export class Link extends EventEmitter {
 		this.identity = identity;
 		this.salt = salt;
 		this.inboxFilePath = join(configDir(), "inbox", `${identity.code}.log`);
+		// Touch the file so an agent's `Monitor`/`tail -f` doesn't fail with
+		// "no such file" before the first peer message arrives.
 		try {
 			mkdirSync(dirname(this.inboxFilePath), { recursive: true });
+			closeSync(openSync(this.inboxFilePath, "a"));
 		} catch {}
 	}
 
