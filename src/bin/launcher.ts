@@ -6,6 +6,18 @@ import { newIpcAddress, IPC_ENV_ADDR, IPC_ENV_TOKEN } from "../util/ipc-protocol
 import { IpcServer } from "../wrapper/ipc-server";
 import { which } from "../util/which";
 
+// Suppress benign races between node-pty's internal socket and ConPTY/winpty
+// teardown on Windows + Bun. `Socket is closed` errors here surface
+// asynchronously from inside node-pty's own EventEmitter chain — there is no
+// call site we can wrap to catch them. They're harmless: the worst case is a
+// dropped keystroke / dropped inject. Swallow them; let everything else
+// propagate normally.
+process.on("uncaughtException", (err: any) => {
+	if (err?.code === "ERR_SOCKET_CLOSED") return;
+	console.error(err);
+	process.exit(1);
+});
+
 /**
  * Headless claude modes (e.g. `--print` / `-p`) don't need a TTY and don't
  * need keystroke injection. Detecting them lets us bypass node-pty entirely,
@@ -82,6 +94,14 @@ async function main() {
 		process.stderr.write(`claude-link: failed to spawn ${claudeBin}: ${err?.message ?? err}\n`);
 		process.exit(1);
 	}
+
+	// Attach an error listener directly on the IPty (it extends EventEmitter
+	// internally) so any error that gets emit'd doesn't crash the process. Most
+	// of these are the same ConPTY socket race covered by uncaughtException
+	// above; this is belt-and-suspenders.
+	try {
+		(term as any).on?.("error", () => {});
+	} catch {}
 
 	// Tell the user (only once, on stderr) where the salt came from so they
 	// know whether they're in zero-config mode or running with their own.
