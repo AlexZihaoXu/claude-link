@@ -1,16 +1,20 @@
-// End-to-end test for the MCP layer.
+// End-to-end test: PTY launcher + IPC + inject.
 //
-// Spawns two `claude-link mcp` instances via Bun, fakes the launcher env so
-// they both pass the launcher guard, drives them via JSON-RPC stdin to:
-//   1. read agent codes (link_whoami)
-//   2. connect alice → bob (link_connect)
-//   3. send a message both ways (link_send)
-//   4. drain inboxes on both sides (link_inbox) and verify
+// Strategy:
+//   - Spawn two claude-link launchers, each set to launch `bun e -e "..."` as
+//     a stand-in for claude. The stand-in just echoes everything its stdin
+//     receives, then prints when it sees a marker line, then exits.
+//   - Inside the same process tree as each launcher, spawn the MCP server
+//     (talking JSON-RPC over our test transport, not stdio of claude).
+//   - Use the MCP tools to make alice connect to bob, then send a message.
+//   - Verify the message appears as a line on bob's PTY stdout (i.e., in the
+//     stand-in's stdout, captured via the launcher).
 //
-// Each MCP needs a unique session id, so we point them at temp project dirs
-// containing a single fake JSONL apiece.
-//
-// Run:  bun run scripts/e2e-mcp.ts
+// Because the launcher takes over the parent process's stdin and PTY, and we
+// can't easily run two of them concurrently in the SAME bun process, we
+// instead drive both MCP servers WITHOUT a full launcher PTY — but we DO start
+// the launcher's IPC server in the same process so the MCP can connect and
+// inject. We then assert the IPC inject path actually fires.
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { mkdir, writeFile, rm } from "node:fs/promises";
@@ -18,8 +22,10 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { encodeProjectDir } from "../src/config/paths";
+import { newIpcAddress, IPC_ENV_ADDR, IPC_ENV_TOKEN } from "../src/util/ipc-protocol";
+import { IpcServer } from "../src/wrapper/ipc-server";
 
-const SALT = "claude-link-mcp-e2e-test-salt";
+const SALT = "claude-link-inject-e2e-test-salt";
 
 interface PendingReq {
 	resolve: (v: any) => void;
@@ -38,7 +44,6 @@ class McpClient {
 			stdio: ["pipe", "pipe", "pipe"],
 			env,
 		});
-
 		this.proc.stdout!.setEncoding("utf8");
 		this.proc.stderr!.setEncoding("utf8");
 		this.proc.stdout!.on("data", (chunk: string) => this.onStdout(chunk));
@@ -61,7 +66,6 @@ class McpClient {
 			try {
 				msg = JSON.parse(line);
 			} catch {
-				console.error(`[${this.name} parse-fail]`, line);
 				continue;
 			}
 			if (msg.id !== undefined && this.pending.has(msg.id)) {
@@ -82,7 +86,7 @@ class McpClient {
 			setTimeout(() => {
 				if (this.pending.has(id)) {
 					this.pending.delete(id);
-					reject(new Error(`[${this.name}] ${method} timed out after 30s`));
+					reject(new Error(`[${this.name}] ${method} timed out`));
 				}
 			}, 30_000);
 		});
@@ -105,19 +109,17 @@ class McpClient {
 		return String(block.text);
 	}
 
-	async stop(): Promise<void> {
+	stop(): Promise<void> {
 		try {
 			this.proc.kill();
 		} catch {}
-		await new Promise((r) => setTimeout(r, 200));
+		return new Promise((r) => setTimeout(r, 200));
 	}
 }
 
-async function setupSessionDir(label: string): Promise<{ cwd: string; sessionId: string }> {
-	const sessionId = randomUUID();
-	const fakeProjectCwd = join(tmpdir(), `claude-link-e2e-${label}-${Date.now()}`);
+async function setupSessionDir(label: string): Promise<{ cwd: string }> {
+	const fakeProjectCwd = join(tmpdir(), `claude-link-inject-e2e-${label}-${Date.now()}`);
 	await mkdir(fakeProjectCwd, { recursive: true });
-
 	const claudeProjectsDir = join(
 		process.env.USERPROFILE || process.env.HOME || tmpdir(),
 		".claude",
@@ -125,18 +127,30 @@ async function setupSessionDir(label: string): Promise<{ cwd: string; sessionId:
 		encodeProjectDir(fakeProjectCwd),
 	);
 	await mkdir(claudeProjectsDir, { recursive: true });
+	const sessionId = randomUUID();
 	await writeFile(join(claudeProjectsDir, `${sessionId}.jsonl`), "{}\n", "utf8");
-
-	return { cwd: fakeProjectCwd, sessionId };
+	return { cwd: fakeProjectCwd };
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 async function main() {
-	const [aliceSetup, bobSetup] = await Promise.all([
-		setupSessionDir("alice"),
-		setupSessionDir("bob"),
-	]);
+	const [aliceSetup, bobSetup] = await Promise.all([setupSessionDir("alice"), setupSessionDir("bob")]);
+
+	// Stand-in IPC servers — these mimic what the real launcher would do.
+	const aliceInjected: string[] = [];
+	const bobInjected: string[] = [];
+
+	const aliceIpc = newIpcAddress();
+	const bobIpc = newIpcAddress();
+
+	const aliceSrv = new IpcServer(aliceIpc.addr, aliceIpc.token, {
+		onInject: (bytes) => aliceInjected.push(bytes),
+	});
+	const bobSrv = new IpcServer(bobIpc.addr, bobIpc.token, {
+		onInject: (bytes) => bobInjected.push(bytes),
+	});
+	await Promise.all([aliceSrv.start(), bobSrv.start()]);
 
 	const baseEnv: NodeJS.ProcessEnv = {
 		...process.env,
@@ -149,60 +163,51 @@ async function main() {
 		...baseEnv,
 		CLAUDE_LINK_LAUNCHER_CWD: aliceSetup.cwd,
 		CLAUDE_LINK_NAME: "Alice",
+		[IPC_ENV_ADDR]: aliceIpc.addr,
+		[IPC_ENV_TOKEN]: aliceIpc.token,
 	});
 	const bob = new McpClient("bob", {
 		...baseEnv,
 		CLAUDE_LINK_LAUNCHER_CWD: bobSetup.cwd,
 		CLAUDE_LINK_NAME: "Bob",
+		[IPC_ENV_ADDR]: bobIpc.addr,
+		[IPC_ENV_TOKEN]: bobIpc.token,
 	});
 
 	let exitCode = 0;
 	try {
-		console.log("\n[1] initialize both…");
+		console.log("\n[1] initialize both MCPs…");
 		await Promise.all([alice.initialize(), bob.initialize()]);
 
-		console.log("\n[2] link_whoami — kicks off peer registration on both sides…");
 		const aw = JSON.parse(await alice.callTool("link_whoami"));
 		const bw = JSON.parse(await bob.callTool("link_whoami"));
-		console.log("    alice:", aw);
-		console.log("    bob  :", bw);
-		if (!aw.ready) throw new Error("alice not ready");
-		if (!bw.ready) throw new Error("bob not ready");
-		if (aw.code === bw.code) throw new Error("alice and bob ended up with the same code (session-id collision?)");
+		console.log(`    alice ${aw.code}, bob ${bw.code}`);
 
-		// Give the eager peer.start() a moment to actually open signaling.
-		console.log("\n    waiting 3s for both peers to register on signaling…");
 		await sleep(3000);
 
-		console.log("\n[3] alice → bob link_connect…");
+		console.log("\n[2] alice → bob link_connect…");
 		console.log("    " + (await alice.callTool("link_connect", { code: bw.code })));
 
-		console.log("\n[4] alice → bob link_send 'hello bob'…");
+		console.log("\n[3] alice → bob link_send 'hello bob'…");
 		console.log("    " + (await alice.callTool("link_send", { code: bw.code, text: "hello bob" })));
 
+		// Inject is fired async on the receiving side. Give it a beat.
+		await sleep(800);
+
+		console.log("\n[4] verify bob's launcher received an inject for the message…");
+		console.log("    bob inject log:", bobInjected);
+		const matched = bobInjected.find((s) => s.includes("hello bob"));
+		console.log("    matched?", !!matched);
+		if (!matched) throw new Error("bob never received an inject containing 'hello bob'");
+
 		console.log("\n[5] bob → alice link_send 'hi alice'…");
-		// Give a moment for bob to receive alice's hello so bob has the connection
-		await sleep(500);
 		console.log("    " + (await bob.callTool("link_send", { code: aw.code, text: "hi alice" })));
+		await sleep(800);
+		console.log("    alice inject log:", aliceInjected);
+		const matched2 = aliceInjected.find((s) => s.includes("hi alice"));
+		console.log("    matched?", !!matched2);
+		if (!matched2) throw new Error("alice never received an inject containing 'hi alice'");
 
-		await sleep(500);
-
-		console.log("\n[6] drain inboxes…");
-		const aliceInbox = JSON.parse(await alice.callTool("link_inbox"));
-		const bobInbox = JSON.parse(await bob.callTool("link_inbox"));
-		console.log("    alice inbox:", aliceInbox);
-		console.log("    bob   inbox:", bobInbox);
-
-		const aliceGotIt = aliceInbox.find(
-			(e: any) => e.kind === "msg" && e.from === bw.code && e.text === "hi alice",
-		);
-		const bobGotIt = bobInbox.find(
-			(e: any) => e.kind === "msg" && e.from === aw.code && e.text === "hello bob",
-		);
-		console.log("    alice received from bob?", !!aliceGotIt);
-		console.log("    bob received from alice?", !!bobGotIt);
-
-		if (!aliceGotIt || !bobGotIt) throw new Error("missing message(s)");
 		console.log("\nE2E PASS ✔");
 	} catch (e: any) {
 		console.error("\nE2E FAIL ✘:", e?.message ?? e);
@@ -212,9 +217,11 @@ async function main() {
 		for (const l of bob.stderr.slice(-30)) console.error(l);
 		exitCode = 1;
 	} finally {
-		await Promise.all([alice.stop(), bob.stop()]);
-		// Best-effort cleanup of the fake project dirs.
-		await Promise.all([rm(aliceSetup.cwd, { recursive: true, force: true }).catch(() => {}), rm(bobSetup.cwd, { recursive: true, force: true }).catch(() => {})]);
+		await Promise.all([alice.stop(), bob.stop(), aliceSrv.stop(), bobSrv.stop()]);
+		await Promise.all([
+			rm(aliceSetup.cwd, { recursive: true, force: true }).catch(() => {}),
+			rm(bobSetup.cwd, { recursive: true, force: true }).catch(() => {}),
+		]);
 		process.exit(exitCode);
 	}
 }

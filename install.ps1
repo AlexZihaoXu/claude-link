@@ -43,47 +43,57 @@ if (-not $ClaudeLink) {
     exit 1
 }
 
-# node-datachannel native binary fallback if Bun didn't run the postinstall.
-$NdDir = Join-Path $BunBin '..\install\global\node_modules\node-datachannel'
-if (Test-Path $NdDir) {
-    $NdBin = Join-Path $NdDir 'build\Release\node_datachannel.node'
-    if (-not (Test-Path $NdBin)) {
-        Write-Say "fetching node-datachannel native binary..."
-        Push-Location $NdDir
-        try {
-            bunx prebuild-install -r napi 2>&1 | Out-Null
-            if (-not (Test-Path $NdBin)) {
-                Write-Err "prebuild-install did not produce $NdBin. Try manually:"
-                Write-Err "  cd `"$NdDir`"; npm install --build-from-source"
-                exit 1
-            }
-        } finally {
-            Pop-Location
+# node-datachannel + node-pty native binary fallback if Bun didn't run the postinstall.
+$GlobalNm = Join-Path (Split-Path $BunBin -Parent) 'install\global\node_modules'
+foreach ($pkg in @('node-datachannel', 'node-pty')) {
+    $pkgDir = Join-Path $GlobalNm $pkg
+    if (Test-Path $pkgDir) {
+        $hasNative = Get-ChildItem -Path $pkgDir -Filter '*.node' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $hasNative) {
+            Write-Say "fetching prebuilt binary for $pkg..."
+            Push-Location $pkgDir
+            try {
+                bunx prebuild-install -r napi 2>&1 | Out-Null
+            } catch {} finally { Pop-Location }
         }
     }
 }
 
 Write-Ok "claude-link installed: $($ClaudeLink.Source)"
 
+# Register the MCP server.
 Write-Say "registering claude-link MCP server with Claude Code (user scope)..."
 claude mcp remove --scope user claude-link 2>$null | Out-Null
-claude mcp add --scope user claude-link -- claude-link mcp
+claude mcp add --scope user claude-link -- claude-link-mcp
 if ($LASTEXITCODE -ne 0) {
     Write-Err "claude mcp add failed."
     exit $LASTEXITCODE
 }
 Write-Ok "MCP server registered."
 
+# Auto-generate a salt if none exists.
+$SaltFile = (claude-link-config path).Trim()
+$NeedsSalt = -not (Test-Path $SaltFile -PathType Leaf) -or (Get-Item $SaltFile).Length -eq 0
+if ($NeedsSalt -and -not $env:CLAUDE_LINK_SALT) {
+    Write-Say "generating a random salt at $SaltFile..."
+    $bytes = New-Object byte[] 32
+    [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+    $SaltVal = ($bytes | ForEach-Object { $_.ToString('x2') }) -join ''
+    claude-link-config set $SaltVal | Out-Null
+    Write-Ok "salt written. Share it (Get-Content '$SaltFile') with anyone you want to link with."
+} else {
+    Write-Ok "existing salt detected - kept as-is."
+}
+
 Write-Host ""
-Write-Host "Next steps:"
-Write-Host "  1. Set your salt (the shared secret that pairs you with another agent):"
-Write-Host "       claude-link config set `"<a long random string>`""
-Write-Host "     (Both ends of any link must use the SAME salt - share it out of band.)"
+Write-Ok "claude-link is ready. Launch Claude through it from now on:"
+Write-Host "    claude-link             # instead of `claude`"
+Write-Host "    claude-link --resume    # all claude args still work"
 Write-Host ""
-Write-Host "  2. Launch Claude through claude-link from now on:"
-Write-Host "       claude-link             # instead of `claude`"
-Write-Host "       claude-link --resume    # all claude args still work"
+Write-Host "Helper commands:"
+Write-Host "    claude-link-config get|set|path"
+Write-Host "    claude-link-id [<session-uuid>]"
 Write-Host ""
-Write-Host "  3. To uninstall:"
-Write-Host "       claude mcp remove --scope user claude-link"
-Write-Host "       bun remove -g claude-link"
+Write-Host "Uninstall:"
+Write-Host "    claude mcp remove --scope user claude-link"
+Write-Host "    bun remove -g claude-link"

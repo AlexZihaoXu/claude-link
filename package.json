@@ -3,9 +3,12 @@
   "version": "0.0.1",
   "description": "P2P bridge between two Claude Code sessions over WebRTC",
   "type": "module",
-  "main": "src/cli.ts",
+  "main": "src/bin/launcher.ts",
   "bin": {
-    "claude-link": "src/cli.ts"
+    "claude-link": "src/bin/launcher.ts",
+    "claude-link-mcp": "src/bin/mcp.ts",
+    "claude-link-config": "src/bin/config.ts",
+    "claude-link-id": "src/bin/id.ts"
   },
   "files": [
     "src",
@@ -18,13 +21,14 @@
     "PROJECT-STRUCTURE.md"
   ],
   "scripts": {
-    "dev": "bun run src/cli.ts",
+    "dev": "bun run src/bin/launcher.ts",
     "e2e:peer": "bun run scripts/e2e-peer.ts",
     "e2e:mcp": "bun run scripts/e2e-mcp.ts",
+    "e2e:inject": "bun run scripts/e2e-inject.ts",
     "smoke:paths": "bun run scripts/smoke-paths.ts",
-    "id": "bun run src/cli.ts id",
-    "typecheck": "tsc --noEmit",
-    "build": "bun build src/cli.ts --outfile dist/claude-link.js --target=bun --minify"
+    "id": "bun run src/bin/id.ts",
+    "config": "bun run src/bin/config.ts",
+    "typecheck": "tsc --noEmit"
   },
   "license": "MIT",
   "engines": {
@@ -35,6 +39,7 @@
     "@msgpack/msgpack": "^2.8.0",
     "eventemitter3": "^4.0.7",
     "node-datachannel": "^0.32.3",
+    "node-pty": "^1.1.0",
     "peerjs-js-binarypack": "^2.1.0",
     "ws": "^8.20.0"
   },
@@ -44,6 +49,7 @@
     "typescript": "^5.0.0"
   },
   "trustedDependencies": [
-    "node-datachannel"
+    "node-datachannel",
+    "node-pty"
   ]
 }

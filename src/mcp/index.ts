@@ -6,6 +6,7 @@ import { loadSalt } from "../config/salt";
 import { saltFilePath } from "../config/paths";
 import { discoverSessionId } from "../config/session";
 import { deriveAgentId } from "../peer/id";
+import { getIpcClient } from "./ipc-client";
 
 interface BootError {
 	kind: "no-launcher" | "no-session" | "no-salt";
@@ -67,7 +68,38 @@ async function boot(): Promise<BootResult> {
 		// Swallowed — link.start() failure surfaces from explicit tool calls.
 	});
 
+	// Wire inbox-update events to inject as user-typed input via the launcher's
+	// PTY. If IPC isn't available (i.e., not started via claude-link), this
+	// falls back silently and the agent has to call link_inbox to see messages.
+	link.on("inbox-update", () => {
+		void deliverPendingInbox(link).catch(() => {});
+	});
+
 	return { ok: true, data: { identity, link, sessionId: found.sessionId } };
+}
+
+let injectInFlight = false;
+async function deliverPendingInbox(link: Link): Promise<void> {
+	if (injectInFlight) return;
+	const client = await getIpcClient();
+	if (!client) return; // no PTY to inject into; agent must poll link_inbox
+	injectInFlight = true;
+	try {
+		// Loop so that anything enqueued *while* we were awaiting an inject also
+		// gets drained. Without this, a second event landing mid-inject would
+		// hit `injectInFlight === true` and silently get stuck.
+		while (true) {
+			const entries = link.drainInbox();
+			if (!entries.length) break;
+			for (const e of entries) {
+				const tag = e.kind === "msg" ? `[link from ${e.fromName}]` : `[link event]`;
+				// Newline at the end submits the prompt.
+				await client.inject(`${tag} ${e.text}\n`);
+			}
+		}
+	} finally {
+		injectInFlight = false;
+	}
 }
 
 function systemPromptFor(link: Link, sessionId: string): string {
@@ -114,11 +146,11 @@ function systemPromptFor(link: Link, sessionId: string): string {
 		"Tools: link_whoami, link_set_name(name), link_connect(code), link_send(code, text), link_inbox, link_peers.",
 		"Codes are 6 characters of A-Z and 0-9 (e.g. `K3J9PR`). Anything else is invalid.",
 		"",
-		"Receiving messages: claude-link MCP cannot push into your turn directly. To stay responsive while idle, run a `Monitor` tool watching the inbox file (the `link_whoami` response includes its path). Each new line wakes you up, then call link_inbox to drain the actual messages.",
+		"Receiving messages: when launched via the `claude-link` command, peer messages appear automatically as user prompts (prefixed with `[link from <name>]` or `[link event]`). You don't need to poll — just respond like you would to any user input. The `link_inbox` tool is still available as a fallback if you suspect a message went missing.",
 		"",
-		"Inbox entries come in two flavors:",
-		"- kind: 'msg' — a peer sent you a message. Reply via link_send if appropriate.",
-		"- kind: 'system' — a notification from the link itself (peer connected/disconnected, signaling reconnected, etc.). DO NOT reply via link_send — these are FYI for you to mention to the user.",
+		"Two kinds of pushed messages can arrive:",
+		"- `[link from <name>] <text>` — a peer agent sent you a message. Reply via link_send.",
+		"- `[link event] <text>` — a notification from the link itself (peer connected/disconnected, signaling reconnected, etc.). DO NOT reply via link_send — these are FYI for you to mention to the user if relevant. They are not user input you should answer.",
 		"",
 		"When to reply via link_send (and only link_send — plain output is not routed back):",
 		"- Reply when you have a real answer, question, status update, or new information.",

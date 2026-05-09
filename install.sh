@@ -30,7 +30,7 @@ fi
 say "installing claude-link from github:$REPO#$REF (global)…"
 bun install -g "github:$REPO#$REF"
 
-# Make sure the bun global bin is on PATH for THIS shell so we can verify.
+# Make sure the bun global bin is on PATH for THIS shell.
 BUN_BIN="${BUN_INSTALL:-$HOME/.bun}/bin"
 if [ -d "$BUN_BIN" ] && [[ ":$PATH:" != *":$BUN_BIN:"* ]]; then
   export PATH="$BUN_BIN:$PATH"
@@ -43,37 +43,54 @@ if ! command -v claude-link >/dev/null 2>&1; then
   exit 1
 fi
 
-# Native binary: node-datachannel needs its prebuilt .node. Bun's trusted-deps
-# resolution from a github install is finicky — fall back to the official
-# prebuild-install if the binary is missing.
-ND_DIR="${BUN_INSTALL:-$HOME/.bun}/install/global/node_modules/node-datachannel"
-if [ -d "$ND_DIR" ] && [ ! -f "$ND_DIR/build/Release/node_datachannel.node" ]; then
-  say "fetching node-datachannel native binary…"
-  ( cd "$ND_DIR" && bunx prebuild-install -r napi >/dev/null 2>&1 ) || {
-    err "prebuild-install failed. Try manually: cd \"$ND_DIR\" && npm install --build-from-source"
-    exit 1
-  }
-fi
+# Native binary fallback for node-datachannel and node-pty: bun's trustedDependencies
+# isn't always honored on github installs. Run prebuild-install if any binary is missing.
+GLOBAL_NM="${BUN_INSTALL:-$HOME/.bun}/install/global/node_modules"
+for pkg in node-datachannel node-pty; do
+  pkg_dir="$GLOBAL_NM/$pkg"
+  if [ -d "$pkg_dir" ]; then
+    if ! find "$pkg_dir/build" -name '*.node' 2>/dev/null | grep -q .; then
+      say "fetching prebuilt binary for $pkg…"
+      ( cd "$pkg_dir" && bunx prebuild-install -r napi >/dev/null 2>&1 ) || \
+      ( cd "$pkg_dir" && npx --yes prebuild-install -r napi >/dev/null 2>&1 ) || true
+    fi
+  fi
+done
 ok "claude-link installed: $(command -v claude-link)"
 
-# Register the MCP server with Claude Code (user-scope = available everywhere).
-# Idempotent: `claude mcp remove` then `claude mcp add` so re-running is safe.
+# Register the MCP server.
 say "registering claude-link MCP server with Claude Code (user scope)…"
 claude mcp remove --scope user claude-link >/dev/null 2>&1 || true
-claude mcp add --scope user claude-link -- claude-link mcp
+claude mcp add --scope user claude-link -- claude-link-mcp
 ok "MCP server registered."
 
+# Auto-generate a salt if none exists. The salt is required for any peer
+# connection; bootstrapping with one means the install is genuinely
+# zero-config. To link with someone on another machine, replace this with a
+# salt you both share — but for solo use / same-machine testing, this is fine.
+SALT_FILE="$(claude-link-config path)"
+if [ ! -s "$SALT_FILE" ] && [ -z "${CLAUDE_LINK_SALT:-}" ]; then
+  say "generating a random salt at $SALT_FILE…"
+  if command -v openssl >/dev/null 2>&1; then
+    SALT_VAL="$(openssl rand -hex 32)"
+  else
+    SALT_VAL="$(head -c 64 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+  fi
+  claude-link-config set "$SALT_VAL" >/dev/null
+  ok "salt written. Share it (\`cat $SALT_FILE\`) with anyone you want to link with."
+else
+  ok "existing salt detected — kept as-is."
+fi
+
 echo
-echo "Next steps:"
-echo "  1. Set your salt (the shared secret that pairs you with another agent):"
-echo "       claude-link config set <a long random string>"
-echo "     (Both ends of any link must use the SAME salt — share it out of band.)"
-echo "     Tip: \`openssl rand -hex 32\` is a good way to generate one."
+ok "claude-link is ready. Launch Claude through it from now on:"
+echo "    claude-link            # instead of \`claude\`"
+echo "    claude-link --resume   # all claude args still work"
 echo
-echo "  2. Launch Claude through claude-link from now on:"
-echo "       claude-link            # instead of \`claude\`"
-echo "       claude-link --resume   # all claude args still work"
+echo "Helper commands:"
+echo "    claude-link-config get|set|path"
+echo "    claude-link-id [<session-uuid>]"
 echo
-echo "  3. To uninstall:"
-echo "       claude mcp remove --scope user claude-link"
-echo "       bun remove -g claude-link"
+echo "Uninstall:"
+echo "    claude mcp remove --scope user claude-link"
+echo "    bun remove -g claude-link"
