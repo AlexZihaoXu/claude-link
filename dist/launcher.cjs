@@ -6,6 +6,33 @@
 
 "use strict";
 
+// node-pty ships a `spawn-helper` binary in its prebuilds dir on POSIX.
+// Some installers (notably bun's global install) drop the executable bit,
+// causing `pty.spawn` to fail with a bare "posix_spawnp failed" the first
+// time anything is launched. Restore +x before loading node-pty so the
+// fix is in place by the time spawn() runs.
+(function ensureSpawnHelperExecutable() {
+	if (process.platform === "win32") return;
+	try {
+		const fsLocal = require("node:fs");
+		const pathLocal = require("node:path");
+		const ptyPkg = require.resolve("node-pty/package.json");
+		const root = pathLocal.dirname(ptyPkg);
+		const arch = process.arch;
+		const helper = pathLocal.join(root, "prebuilds", `darwin-${arch}`, "spawn-helper");
+		const linuxHelper = pathLocal.join(root, "prebuilds", `linux-${arch}`, "spawn-helper");
+		for (const p of [helper, linuxHelper]) {
+			try {
+				const st = fsLocal.statSync(p);
+				// Mode 0o111 = any execute bit. If none are set, add user+group+other +x.
+				if (st.isFile() && (st.mode & 0o111) === 0) {
+					fsLocal.chmodSync(p, st.mode | 0o755);
+				}
+			} catch {}
+		}
+	} catch {}
+})();
+
 const pty = require("node-pty");
 const net = require("node:net");
 const fs = require("node:fs");

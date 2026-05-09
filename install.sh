@@ -113,6 +113,10 @@ for pkg in node-datachannel node-pty; do
 	if [ "$(uname -s)" = "Darwin" ]; then
 		find "$pkg_dir" -name '*.node' -exec xattr -d com.apple.quarantine {} \; 2>/dev/null || true
 	fi
+	# bun's global install drops the executable bit on prebuild assets.
+	# node-pty's `spawn-helper` (POSIX) must be +x — without it, every PTY
+	# spawn fails with a bare "posix_spawnp failed".
+	find "$pkg_dir/prebuilds" -type f -name 'spawn-helper' -exec chmod +x {} \; 2>/dev/null || true
 done
 
 # ----- MCP registration -----
