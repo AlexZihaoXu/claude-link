@@ -13,6 +13,12 @@ if (Get-Command bun -ErrorAction SilentlyContinue) {
     bun remove -g claude-link 2>$null | Out-Null
 }
 
+$SkillDst = if ($env:CLAUDE_HOME) { Join-Path $env:CLAUDE_HOME 'skills\claude-link' } else { Join-Path $env:USERPROFILE '.claude\skills\claude-link' }
+if (Test-Path $SkillDst) {
+    Write-Say "removing skill at $SkillDst..."
+    Remove-Item -Recurse -Force $SkillDst
+}
+
 Write-Ok "claude-link uninstalled."
 $SaltPath = try { (claude-link config path) 2>$null } catch { '~/.config/claude-link/salt' }
 Write-Host "Salt file (kept; remove manually if you want): $SaltPath"

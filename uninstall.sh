@@ -14,5 +14,11 @@ if command -v bun >/dev/null 2>&1; then
   bun remove -g claude-link 2>/dev/null || true
 fi
 
+SKILL_DST="${CLAUDE_HOME:-$HOME/.claude}/skills/claude-link"
+if [ -d "$SKILL_DST" ]; then
+  say "removing skill at $SKILL_DST…"
+  rm -rf "$SKILL_DST"
+fi
+
 ok "claude-link uninstalled."
 echo "Salt file (kept; remove manually if you want): \$(claude-link config path 2>/dev/null || echo '~/.config/claude-link/salt')"

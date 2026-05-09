@@ -64,6 +64,19 @@ claude mcp remove --scope user claude-link >/dev/null 2>&1 || true
 claude mcp add --scope user claude-link -- claude-link-mcp
 ok "MCP server registered."
 
+# Install the skill so the agent knows what claude-link is and when to use it.
+SKILL_SRC="$GLOBAL_NM/claude-link/skills/claude-link"
+SKILL_DST="${CLAUDE_HOME:-$HOME/.claude}/skills/claude-link"
+if [ -d "$SKILL_SRC" ]; then
+  say "installing claude-link skill at $SKILL_DST…"
+  mkdir -p "$(dirname "$SKILL_DST")"
+  rm -rf "$SKILL_DST"
+  cp -r "$SKILL_SRC" "$SKILL_DST"
+  ok "skill installed."
+else
+  err "skill source not found at $SKILL_SRC — agent guidance won't be available, but tools will still work."
+fi
+
 # Auto-generate a salt if none exists. The salt is required for any peer
 # connection; bootstrapping with one means the install is genuinely
 # zero-config. To link with someone on another machine, replace this with a

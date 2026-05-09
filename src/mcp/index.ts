@@ -221,9 +221,12 @@ export async function run(): Promise<void> {
 				salt: data.link.salt.origin,
 				ready: data.link.salt.value !== null,
 				session: data.sessionId,
+				inboxFilePath: data.link.inboxFilePath,
+				inboxFileHint:
+					"Arm a `Monitor` tool on inboxFilePath if you want peer messages to wake you up while you're waiting for user input. Each new line in the file is a new inbox entry.",
 				warning:
 					data.link.salt.value === null
-						? "NO SHARED SALT IS CONFIGURED. Tell the user to run `claude-link config set <salt>` (or set CLAUDE_LINK_SALT env var). Both you and your peer must use the SAME salt."
+						? "NO SHARED SALT IS CONFIGURED. Tell the user to run `claude-link-config set <salt>` (or set CLAUDE_LINK_SALT env var). Both you and your peer must use the SAME salt."
 						: undefined,
 			};
 			return JSON.stringify(out);

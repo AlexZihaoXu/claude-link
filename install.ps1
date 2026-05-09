@@ -71,6 +71,19 @@ if ($LASTEXITCODE -ne 0) {
 }
 Write-Ok "MCP server registered."
 
+# Install the skill so the agent knows what claude-link is and when to use it.
+$SkillSrc = Join-Path $GlobalNm 'claude-link\skills\claude-link'
+$SkillDst = if ($env:CLAUDE_HOME) { Join-Path $env:CLAUDE_HOME 'skills\claude-link' } else { Join-Path $env:USERPROFILE '.claude\skills\claude-link' }
+if (Test-Path $SkillSrc) {
+    Write-Say "installing claude-link skill at $SkillDst..."
+    New-Item -ItemType Directory -Path (Split-Path $SkillDst -Parent) -Force | Out-Null
+    if (Test-Path $SkillDst) { Remove-Item -Recurse -Force $SkillDst }
+    Copy-Item -Recurse $SkillSrc $SkillDst
+    Write-Ok "skill installed."
+} else {
+    Write-Err "skill source not found at $SkillSrc - agent guidance won't be available, but tools will still work."
+}
+
 # Auto-generate a salt if none exists.
 $SaltFile = (claude-link-config path).Trim()
 $NeedsSalt = -not (Test-Path $SaltFile -PathType Leaf) -or (Get-Item $SaltFile).Length -eq 0

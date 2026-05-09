@@ -1,4 +1,6 @@
 import { EventEmitter } from "node:events";
+import { appendFileSync, mkdirSync } from "node:fs";
+import { dirname, join } from "node:path";
 import {
 	Peer as RawPeer,
 	type DataConnection,
@@ -7,6 +9,7 @@ import {
 } from "../vendor/peerjs";
 import { deriveAgentId, derivePeerId } from "../peer/id";
 import type { SaltSource } from "../config/salt";
+import { configDir } from "../config/paths";
 
 let polyfillInstalled = false;
 function ensurePolyfill() {
@@ -50,11 +53,31 @@ export class Link extends EventEmitter {
 	private ready: Promise<void> | null = null;
 	readonly identity: Identity;
 	readonly salt: SaltSource;
+	/**
+	 * Append-only mirror of inbox entries (one JSON line each). The agent can
+	 * arm a `Monitor` tool on this path so peer messages wake the session
+	 * while it's idle. We never read this back — it's purely a wake signal +
+	 * audit trail.
+	 */
+	readonly inboxFilePath: string;
 
 	constructor(identity: Identity, salt: SaltSource) {
 		super();
 		this.identity = identity;
 		this.salt = salt;
+		this.inboxFilePath = join(configDir(), "inbox", `${identity.code}.log`);
+		try {
+			mkdirSync(dirname(this.inboxFilePath), { recursive: true });
+		} catch {}
+	}
+
+	private mirrorToFile(entry: InboxEntry): void {
+		try {
+			appendFileSync(this.inboxFilePath, JSON.stringify(entry) + "\n", "utf8");
+		} catch {
+			// Mirror failures shouldn't break message delivery — the in-memory
+			// queue is still authoritative.
+		}
 	}
 
 	private noSaltError(): Error {
@@ -142,6 +165,7 @@ export class Link extends EventEmitter {
 			s?.name || s?.code || conn.peer.slice(0, 8);
 		const enqueue = (e: InboxEntry) => {
 			this.inboxQueue.push(e);
+			this.mirrorToFile(e);
 			if (this.inboxQueue.length > INBOX_MAX) {
 				this.inboxQueue.splice(0, this.inboxQueue.length - INBOX_MAX);
 			}
@@ -222,13 +246,15 @@ export class Link extends EventEmitter {
 	}
 
 	private pushEvent(text: string, peer?: { code?: string; name?: string }): void {
-		this.inboxQueue.push({
+		const entry: InboxEntry = {
 			from: peer?.code ?? "",
 			fromName: peer?.name || peer?.code || "link",
 			text,
 			ts: Date.now(),
 			kind: "system",
-		});
+		};
+		this.inboxQueue.push(entry);
+		this.mirrorToFile(entry);
 		if (this.inboxQueue.length > INBOX_MAX) {
 			this.inboxQueue.splice(0, this.inboxQueue.length - INBOX_MAX);
 		}
