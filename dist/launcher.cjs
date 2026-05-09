@@ -258,9 +258,19 @@ function startIpcServer({ addr, token, onInject }) {
 		} catch {}
 	});
 
+	// Strip terminal mode-enables that produce wonky input on mintty (Git Bash):
+	//   \x1b[?9001h — win32-input-mode on. mintty's win32 sequence for
+	//                Backspace is parsed by claude's TUI as Ctrl+Backspace
+	//                (delete-word). Stripping this keeps the terminal in legacy
+	//                mode where Backspace is just 0x7f and works correctly.
+	//   \x1b[?1004h — focus events on. Not strictly needed and produces
+	//                stray escape sequences when the terminal gains/loses focus.
+	// We only strip the ENABLES; claude can still send the disables on exit and
+	// the terminal-reset block in our exit handler covers anything left over.
+	const STRIP = /\x1b\[\?(?:9001|1004)h/g;
 	term.onData((data) => {
 		try {
-			process.stdout.write(data);
+			process.stdout.write(STRIP.test(data) ? data.replace(STRIP, "") : data);
 		} catch {}
 	});
 
