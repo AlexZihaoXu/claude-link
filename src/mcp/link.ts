@@ -7,7 +7,7 @@ import {
 	installNodeDataChannel,
 	LogLevel,
 } from "../vendor/peerjs";
-import { deriveAgentId, derivePeerId } from "../peer/id";
+import { derivePeerId } from "../peer/id";
 import type { SaltSource } from "../config/salt";
 import { configDir } from "../config/paths";
 
@@ -85,7 +85,7 @@ export class Link extends EventEmitter {
 
 	private noSaltError(): Error {
 		return new Error(
-			`claude-link has no salt configured. Run \`claude-link config set <a long random string>\` (or set CLAUDE_LINK_SALT env var). Both ends of any link must use the SAME salt.`,
+			`claude-link has no salt configured. Run \`claude-link-config set <a long random string>\` (or set CLAUDE_LINK_SALT env var). Both ends of any link must use the SAME salt.`,
 		);
 	}
 
@@ -351,8 +351,7 @@ export class Link extends EventEmitter {
 						new Error(
 							`connect to ${code} timed out after 15s. Most common cause: the OTHER agent has not registered on signaling yet — ` +
 								`they must have called any link_* tool (link_whoami is enough) AT LEAST ONCE since starting. ` +
-								`Other causes: salt mismatch (both ends must use the EXACT same salt — origin on this side: ${this.salt.origin}), ` +
-								`or the other agent ran link_rotate after sharing the code.`,
+								`Other causes: salt mismatch (both ends must use the EXACT same salt — origin on this side: ${this.salt.origin}).`,
 						),
 					),
 				15_000,

@@ -43,6 +43,6 @@ fs.writeFileSync(p, JSON.stringify(s, null, 2) + '\n');
     node -e $script 2>$null | Out-Null
 }
 
+$SaltPath = if ($env:CLAUDE_LINK_SALT_FILE) { $env:CLAUDE_LINK_SALT_FILE } else { Join-Path $env:APPDATA 'claude-link\salt' }
 Write-Ok "claude-link uninstalled."
-$SaltPath = try { (claude-link config path) 2>$null } catch { '~/.config/claude-link/salt' }
 Write-Host "Salt file (kept; remove manually if you want): $SaltPath"

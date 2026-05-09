@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import pkg from "../../package.json" with { type: "json" };
 import { Link, type Identity, type InboxEntry } from "./link";
 import { loadSalt } from "../config/salt";
 import { saltFilePath } from "../config/paths";
@@ -114,7 +115,7 @@ function systemPromptFor(link: Link, sessionId: string): string {
 			"If the user asks you to talk to another Claude session, OR runs any link_* tool, FIRST tell them this:",
 			"",
 			'  "I can\'t connect to other sessions until a shared salt is configured. Pick one of:',
-			"    1. Run `claude-link config set <a long random string>` (writes to the salt file).",
+			"    1. Run `claude-link-config set <a long random string>` (writes to the salt file).",
 			"    2. Set env var CLAUDE_LINK_SALT=<the same string> before starting `claude-link`.",
 			"  Whichever you pick, anyone you want to talk to must use the SAME salt — share it with them out of band.",
 			"  Good salt: `openssl rand -hex 32` produces a 64-char value with plenty of entropy.",
@@ -143,23 +144,18 @@ function systemPromptFor(link: Link, sessionId: string): string {
 		`- Namespace salt: configured (from ${link.salt.origin === "env" ? "env var CLAUDE_LINK_SALT" : "salt file"}). You can only reach agents whose salt matches.`,
 		`- Session: ${sessionId}`,
 		"",
-		"IMPORTANT — making yourself reachable: call link_whoami EARLY (e.g. on the first turn the user mentions linking). This kicks off peer registration on signaling so others can connect to you. Until you call ANY link_* tool, your code is just a string — nobody can reach you. Sharing your code without first calling link_whoami is the most common cause of `link_connect` timing out on the other side.",
+		"IMPORTANT — making yourself reachable: call link_whoami EARLY (e.g. on the first turn the user mentions linking). This kicks off peer registration on signaling so others can connect to you. Until you call ANY link_* tool, your code is just a string — nobody can reach you.",
 		"",
-		"Tools: link_whoami, link_set_name(name), link_connect(code), link_send(code, text), link_inbox, link_peers.",
-		"Codes are 6 characters of A-Z and 0-9 (e.g. `K3J9PR`). Anything else is invalid.",
+		"Tools: link_whoami, link_set_name(name), link_connect(code), link_send(code, text), link_peers, link_inbox (fallback).",
+		"Codes are 6 characters of A-Z and 0-9 (e.g. `K3J9PR`).",
 		"",
-		"Receiving messages: peer messages and link events queue in an inbox you must drain with the `link_inbox` tool. To stay responsive while idle, run a `Monitor` tool watching the inbox file (you can find its path via link_whoami) — each peer message wakes you up, then call link_inbox to read it.",
+		"Receiving messages: peer messages auto-inject into your context as user prompts, prefixed `[link from <name>] <text>`. You don't need to poll. When you see one, treat it as a real user prompt and reply via link_send if substantive. `[link event] <text>` lines are FYI link-internal notifications (peer connected/disconnected etc.) — do NOT reply to those.",
 		"",
-		"link_inbox returns entries in two flavors:",
-		"- `kind: 'msg'` — a peer agent sent you a message. Reply via link_send if appropriate.",
-		"- `kind: 'system'` — a notification from the link itself (peer connected/disconnected, signaling reconnected, etc.). DO NOT reply via link_send — these are FYI for you to mention to the user if relevant.",
-		"",
-		"When to reply via link_send (and only link_send — plain output is not routed back):",
-		"- Reply when you have a real answer, question, status update, or new information.",
-		"- Do NOT reply to acknowledgments, 'thanks', 'ok', or other purely social/closing messages. They end the exchange.",
+		"Etiquette:",
+		"- Don't reply to acknowledgments ('thanks', 'ok', 'got it'). They end the exchange; replying creates a politeness loop.",
 		"- Silence is a valid response.",
-		"",
-		"Treat the link as async coordination, not chat. Send only when something substantive needs to cross.",
+		"- Don't repeat content you sent last turn.",
+		"- Treat the link as async coordination, not chat — send only substantive messages.",
 	);
 	return lines.join("\n");
 }
@@ -175,7 +171,7 @@ function toolResultString(text: string) {
 export async function run(): Promise<void> {
 	const result = await boot();
 
-	const server = new McpServer({ name: "claude-link", version: "0.0.1" });
+	const server = new McpServer({ name: "claude-link", version: pkg.version });
 
 	// Build a generic guard that fronts every tool. If boot failed (no launcher,
 	// no session detected) every tool returns the failure message.
@@ -197,7 +193,7 @@ export async function run(): Promise<void> {
 		return async (data: BootOk, args: any) => {
 			if (!data.link.salt.value) {
 				throw new Error(
-					`claude-link has no salt configured. Run \`claude-link config set <a long random string>\` (or set env var CLAUDE_LINK_SALT). Salt file path: ${saltFilePath()}. Both ends must use the SAME salt.`,
+					`claude-link has no salt configured. Run \`claude-link-config set <a long random string>\` (or set env var CLAUDE_LINK_SALT). Salt file path: ${saltFilePath()}. Both ends must use the SAME salt.`,
 				);
 			}
 			return handler(data, args);
@@ -322,7 +318,7 @@ export async function run(): Promise<void> {
 	// session-id will get UnavailableID until the broker times the stale
 	// registration out — which can take 30s+ on the public cloud.
 	let shuttingDown = false;
-	const shutdown = (signal: string) => {
+	const shutdown = () => {
 		if (shuttingDown) return;
 		shuttingDown = true;
 		if (result.ok) {
@@ -336,12 +332,12 @@ export async function run(): Promise<void> {
 		// Hard-exit fallback if stop() hangs (shouldn't, but defensive).
 		setTimeout(() => process.exit(0), 1500).unref();
 	};
-	process.on("SIGINT", () => shutdown("SIGINT"));
-	process.on("SIGTERM", () => shutdown("SIGTERM"));
-	process.on("SIGHUP", () => shutdown("SIGHUP"));
+	process.on("SIGINT", shutdown);
+	process.on("SIGTERM", shutdown);
+	process.on("SIGHUP", shutdown);
 	// Stdin closing means our parent (claude) is gone.
-	process.stdin.on("end", () => shutdown("stdin-end"));
-	process.stdin.on("close", () => shutdown("stdin-close"));
+	process.stdin.on("end", shutdown);
+	process.stdin.on("close", shutdown);
 
 	const transport = new StdioServerTransport();
 	await server.connect(transport);

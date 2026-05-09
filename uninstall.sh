@@ -44,5 +44,6 @@ if command -v node >/dev/null 2>&1; then
   " 2>/dev/null || true
 fi
 
+SALT_PATH="${CLAUDE_LINK_SALT_FILE:-${HOME}/.config/claude-link/salt}"
 ok "claude-link uninstalled."
-echo "Salt file (kept; remove manually if you want): \$(claude-link config path 2>/dev/null || echo '~/.config/claude-link/salt')"
+echo "Salt file (kept; remove manually if you want): $SALT_PATH"
