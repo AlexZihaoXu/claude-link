@@ -35,6 +35,7 @@ bun install -g "github:$REPO#$REF"
 
 # Make sure the bun global bin is on PATH for THIS shell.
 BUN_BIN="${BUN_INSTALL:-$HOME/.bun}/bin"
+GLOBAL_NM="${BUN_INSTALL:-$HOME/.bun}/install/global/node_modules"
 if [ -d "$BUN_BIN" ] && [[ ":$PATH:" != *":$BUN_BIN:"* ]]; then
   export PATH="$BUN_BIN:$PATH"
 fi
@@ -62,7 +63,6 @@ chmod +x "$BUN_BIN/claude-link"
 
 # Native binary fallback for node-datachannel and node-pty: bun's trustedDependencies
 # isn't always honored on github installs. Run prebuild-install if any binary is missing.
-GLOBAL_NM="${BUN_INSTALL:-$HOME/.bun}/install/global/node_modules"
 for pkg in node-datachannel node-pty; do
   pkg_dir="$GLOBAL_NM/$pkg"
   if [ -d "$pkg_dir" ]; then

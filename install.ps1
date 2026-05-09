@@ -36,6 +36,7 @@ if ($LASTEXITCODE -ne 0) { Write-Err "bun install failed."; exit $LASTEXITCODE }
 
 # Make sure bun global bin is on PATH for this shell.
 $BunBin = if ($env:BUN_INSTALL) { Join-Path $env:BUN_INSTALL 'bin' } else { Join-Path $env:USERPROFILE '.bun\bin' }
+$GlobalNm = Join-Path (Split-Path $BunBin -Parent) 'install\global\node_modules'
 if ((Test-Path $BunBin) -and ($env:PATH -notlike "*$BunBin*")) {
     $env:PATH = "$BunBin;$env:PATH"
 }
@@ -62,7 +63,6 @@ $Lines = @(
 Set-Content -Path $WrapperCmd -Value $Lines -Encoding ascii
 
 # node-datachannel + node-pty native binary fallback if Bun didn't run the postinstall.
-$GlobalNm = Join-Path (Split-Path $BunBin -Parent) 'install\global\node_modules'
 foreach ($pkg in @('node-datachannel', 'node-pty')) {
     $pkgDir = Join-Path $GlobalNm $pkg
     if (Test-Path $pkgDir) {
