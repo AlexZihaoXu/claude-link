@@ -377,13 +377,21 @@ function startIpcServer({ addr, token, onInject }) {
 		}
 	}
 
-	// Empty claude's input regardless of cursor position. Ctrl+U kills the
-	// line in most TUIs; we follow with a backspace flood as belt-and-
-	// suspenders in case Ctrl+U didn't catch everything (or the cursor was
-	// past where Ctrl+U cleared from).
+	// Empty claude's input regardless of cursor position. Naively sending
+	// backspaces fails when the cursor is mid-text — backspace only deletes
+	// chars BEFORE the cursor, so the suffix survives and gets glued to the
+	// peer message on the next inject. So we first push the cursor to the
+	// end of the input via every "go to end" binding we can think of, then
+	// flood backspaces from that endpoint.
 	async function clearClaudeInput() {
-		const CLEAR_FLOOD = 1024; // upper bound — claude's input rarely exceeds this
-		await writePaced("\x15" + "\x7f".repeat(CLEAR_FLOOD));
+		const FLOOD = 256;
+		const RIGHT = "\x1b[C"; // xterm right-arrow — works in any normal-mode TUI
+		await writePaced(
+			"\x05" + // Ctrl+E (emacs end-of-line)
+				"\x1b[F" + // End key (xterm)
+				RIGHT.repeat(FLOOD) + // belt-and-suspenders: walk cursor to end
+				"\x7f".repeat(FLOOD), // backspace flood from end clears everything
+		);
 		await sleep(30);
 	}
 
