@@ -249,9 +249,12 @@ function startIpcServer({ addr, token, onInject }) {
 		} catch {}
 	}
 	process.stdin.resume();
+	// Forward stdin as raw bytes — converting Buffer → utf8 string can mangle
+	// control bytes (e.g. backspace 0x7f gets misinterpreted, which is why
+	// Backspace on Git Bash was acting like Ctrl+W / "delete word").
 	process.stdin.on("data", (chunk) => {
 		try {
-			term.write(chunk.toString("utf8"));
+			term.write(chunk);
 		} catch {}
 	});
 

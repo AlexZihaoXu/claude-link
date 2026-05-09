@@ -93,8 +93,10 @@ async function deliverPendingInbox(link: Link): Promise<void> {
 			if (!entries.length) break;
 			for (const e of entries) {
 				const tag = e.kind === "msg" ? `[link from ${e.fromName}]` : `[link event]`;
-				// Newline at the end submits the prompt.
-				await client.inject(`${tag} ${e.text}\n`);
+				// Carriage return at the end is what Claude Code's TUI treats as
+				// Enter (submitting the prompt). \n alone leaves the line in the
+				// input box unsubmitted.
+				await client.inject(`${tag} ${e.text}\r`);
 			}
 		}
 	} finally {
