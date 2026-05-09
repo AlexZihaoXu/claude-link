@@ -236,9 +236,25 @@ function startIpcServer({ addr, token, onInject }) {
 	const ipcServer = await startIpcServer({
 		addr: ipc.addr,
 		token: ipc.token,
+		// Inject simulates the user typing the message and then pressing Enter.
+		// claude's TUI treats a single chunk like `text\r` as a pasted block
+		// with a literal newline, NOT as "typed text followed by Enter" — so
+		// the message lands in the input box without submitting. Split it: write
+		// the body, brief pause to look like user typing, then write the Enter
+		// keystroke separately.
 		onInject: (bytes /*, interrupt */) => {
 			try {
-				term.write(bytes);
+				const m = /^([\s\S]*?)([\r\n]+)$/.exec(bytes);
+				if (m) {
+					if (m[1]) term.write(m[1]);
+					setTimeout(() => {
+						try {
+							term.write("\r");
+						} catch {}
+					}, 60);
+				} else {
+					term.write(bytes);
+				}
 			} catch {}
 		},
 	});
@@ -250,18 +266,40 @@ function startIpcServer({ addr, token, onInject }) {
 	}
 	process.stdin.resume();
 	const debugInput = process.env.CLAUDE_LINK_DEBUG_INPUT === "1";
-	// Forward stdin as raw bytes — converting Buffer → utf8 string can mangle
-	// control bytes (e.g. backspace 0x7f gets misinterpreted, which is why
-	// Backspace on Git Bash was acting like Ctrl+W / "delete word").
+	const isWin = process.platform === "win32";
+	// On Windows + mintty (Git Bash), the Backspace key sends 0x08 (BS / Ctrl+H)
+	// instead of the 0x7f (DEL) byte that claude's TUI expects for plain
+	// Backspace. Result: every Backspace is parsed as Ctrl+Backspace (delete
+	// word). Translate any unaccompanied 0x08 to 0x7f on the way through.
+	function fixBackspace(chunk) {
+		if (!isWin) return chunk;
+		// Skip the translation if the chunk is part of an escape sequence
+		// (starts with 0x1b) — 0x08 inside escape sequences shouldn't be
+		// rewritten. In practice mintty never sends 0x08 inside an escape
+		// sequence, but be defensive.
+		if (chunk[0] === 0x1b) return chunk;
+		let needsCopy = false;
+		for (let i = 0; i < chunk.length; i++) {
+			if (chunk[i] === 0x08) {
+				needsCopy = true;
+				break;
+			}
+		}
+		if (!needsCopy) return chunk;
+		const out = Buffer.from(chunk);
+		for (let i = 0; i < out.length; i++) if (out[i] === 0x08) out[i] = 0x7f;
+		return out;
+	}
 	process.stdin.on("data", (chunk) => {
+		const fixed = fixBackspace(chunk);
 		if (debugInput) {
-			const hex = Array.from(chunk)
+			const hex = Array.from(fixed)
 				.map((b) => b.toString(16).padStart(2, "0"))
 				.join(" ");
 			process.stderr.write(`[stdin] ${hex}\n`);
 		}
 		try {
-			term.write(chunk);
+			term.write(fixed);
 		} catch {}
 	});
 
