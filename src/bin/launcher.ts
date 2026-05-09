@@ -1,9 +1,20 @@
 #!/usr/bin/env bun
 import * as pty from "node-pty";
+import { spawn as cpSpawn } from "node:child_process";
 import { loadSalt, saltPreview } from "../config/salt";
 import { newIpcAddress, IPC_ENV_ADDR, IPC_ENV_TOKEN } from "../util/ipc-protocol";
 import { IpcServer } from "../wrapper/ipc-server";
 import { which } from "../util/which";
+
+/**
+ * Headless claude modes (e.g. `--print` / `-p`) don't need a TTY and don't
+ * need keystroke injection. Detecting them lets us bypass node-pty entirely,
+ * which avoids both the Bun-on-Windows ConPTY rough edges and the unnecessary
+ * IPC wiring.
+ */
+function isHeadlessMode(args: string[]): boolean {
+	return args.some((a) => a === "--print" || a === "-p");
+}
 
 /**
  * Pure passthrough launcher. Spawns `claude` in a PTY and proxies stdin /
@@ -25,6 +36,11 @@ async function main() {
 	// does, so resolve `claude` → `claude.exe` (or `.cmd` etc.) explicitly.
 	const claudeBin = which(claudeBinName) ?? claudeBinName;
 	const cwd = process.cwd();
+
+	if (isHeadlessMode(args)) {
+		await runHeadless(claudeBinName, claudeBin, args, salt, ipc, cwd);
+		return;
+	}
 
 	const env: NodeJS.ProcessEnv = {
 		...process.env,
@@ -79,7 +95,13 @@ async function main() {
 	// IPC server for the MCP grandchild.
 	const ipcServer = new IpcServer(ipc.addr, ipc.token, {
 		onInject: (bytes, _interrupt) => {
-			term.write(bytes);
+			try {
+				term.write(bytes);
+			} catch {
+				// PTY may have been torn down between the inject request and the
+				// actual write. We don't surface the error to the MCP client —
+				// it's transient and the agent will see "delivered" regardless.
+			}
 		},
 	});
 	await ipcServer.start();
@@ -90,7 +112,12 @@ async function main() {
 	}
 	process.stdin.resume();
 	process.stdin.on("data", (chunk: Buffer) => {
-		term.write(chunk.toString("utf8"));
+		try {
+			term.write(chunk.toString("utf8"));
+		} catch {
+			// Same rationale as the inject handler — node-pty's write can fire
+			// "Socket is closed" if ConPTY raced ahead. Don't crash the launcher.
+		}
 	});
 
 	// PTY → stdout
@@ -137,6 +164,67 @@ async function main() {
 	await ipcServer.stop();
 
 	process.exit(exitInfo.code ?? 0);
+}
+
+async function runHeadless(
+	claudeBinName: string,
+	claudeBin: string,
+	args: string[],
+	salt: Awaited<ReturnType<typeof loadSalt>>,
+	ipc: ReturnType<typeof newIpcAddress>,
+	cwd: string,
+): Promise<void> {
+	if (claudeBin === claudeBinName && which(claudeBinName) === null) {
+		process.stderr.write(
+			`claude-link: \`${claudeBinName}\` not found on PATH.\n` +
+				`  Install Claude Code first (https://claude.com/code), or override with CLAUDE_LINK_CLAUDE_BIN.\n`,
+		);
+		process.exit(127);
+	}
+
+	const env: NodeJS.ProcessEnv = {
+		...process.env,
+		CLAUDE_LINK_LAUNCHER: "1",
+		CLAUDE_LINK_LAUNCHER_PID: String(process.pid),
+		CLAUDE_LINK_LAUNCHER_CWD: cwd,
+		CLAUDE_LINK_SALT_ORIGIN: salt.origin,
+		[IPC_ENV_ADDR]: ipc.addr,
+		[IPC_ENV_TOKEN]: ipc.token,
+	};
+	if (salt.value) env.CLAUDE_LINK_SALT = salt.value;
+
+	const child = cpSpawn(claudeBin, args, {
+		stdio: "inherit",
+		env,
+		cwd,
+		shell: false,
+	});
+
+	child.on("error", (err) => {
+		process.stderr.write(`claude-link: failed to spawn ${claudeBin}: ${err.message}\n`);
+		process.exit(1);
+	});
+
+	const passSig = (sig: NodeJS.Signals) => {
+		try {
+			child.kill(sig);
+		} catch {}
+	};
+	process.on("SIGINT", () => passSig("SIGINT"));
+	process.on("SIGTERM", () => passSig("SIGTERM"));
+
+	await new Promise<void>((resolve) => {
+		child.on("exit", (code, signal) => {
+			if (signal) {
+				try {
+					process.kill(process.pid, signal);
+				} catch {}
+				resolve();
+				return;
+			}
+			process.exit(code ?? 0);
+		});
+	});
 }
 
 main().catch((err) => {
