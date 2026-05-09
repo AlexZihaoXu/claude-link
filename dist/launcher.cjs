@@ -12,16 +12,21 @@ const fs = require("node:fs");
 const path = require("node:path");
 const os = require("node:os");
 const crypto = require("node:crypto");
+const pkg = require("../package.json");
 
 // ---------- env ----------
 
 const args = process.argv.slice(2);
 const claudeBinName = process.env.CLAUDE_LINK_CLAUDE_BIN || "claude";
+// `--version` mode is a one-shot info call: silence our own banner so the
+// stdout is just claude's version + ours, and append a claude-link line on
+// successful exit so users can see both at a glance.
+const isVersionMode = args.includes("--version");
 
 function which(name) {
 	if (!name) return null;
 	if (path.isAbsolute(name) || name.includes(path.sep) || name.includes("/")) {
-		return existsAsFile(name) ? name : null;
+		return isRunnable(name) ? name : null;
 	}
 	const dirs = (process.env.PATH || "").split(path.delimiter).filter(Boolean);
 	const exts =
@@ -31,14 +36,23 @@ function which(name) {
 	for (const dir of dirs) {
 		for (const ext of exts) {
 			const p = path.join(dir, name + ext);
-			if (existsAsFile(p)) return p;
+			if (isRunnable(p)) return p;
 		}
 	}
 	return null;
 }
-function existsAsFile(p) {
+
+function isRunnable(p) {
 	try {
-		return fs.statSync(p).isFile();
+		const st = fs.statSync(p);
+		if (!st.isFile()) return false;
+		// On POSIX, also require X_OK so we don't return paths that exist but
+		// can't actually be exec'd (which would surface later as a confusing
+		// posix_spawnp failure inside node-pty).
+		if (process.platform !== "win32") {
+			fs.accessSync(p, fs.constants.X_OK);
+		}
+		return true;
 	} catch {
 		return false;
 	}
@@ -209,7 +223,7 @@ function startIpcServer({ addr, token, onInject }) {
 	});
 	if (salt.value) env.CLAUDE_LINK_SALT = salt.value;
 
-	if (process.stderr.isTTY) {
+	if (process.stderr.isTTY && !isVersionMode) {
 		const note = salt.value
 			? `claude-link: salt loaded from ${salt.origin} (${saltPreview(salt.value)})`
 			: `claude-link: WARNING — no salt configured. Run \`claude-link-config set <random>\` to enable peer connections.`;
@@ -219,18 +233,44 @@ function startIpcServer({ addr, token, onInject }) {
 	const cols = process.stdout.columns || 80;
 	const rows = process.stdout.rows || 24;
 
+	const spawnOpts = {
+		name: process.env.TERM || "xterm-256color",
+		cols,
+		rows,
+		cwd,
+		env,
+	};
 	let term;
 	try {
-		term = pty.spawn(claudeBin, args, {
-			name: process.env.TERM || "xterm-256color",
-			cols,
-			rows,
-			cwd,
-			env,
-		});
+		term = pty.spawn(claudeBin, args, spawnOpts);
 	} catch (err) {
-		process.stderr.write(`claude-link: failed to spawn ${claudeBin}: ${err && err.message}\n`);
-		process.exit(1);
+		// On POSIX, node-pty's direct posix_spawnp fails for some shebang/permission
+		// quirks even when the file is otherwise executable. Re-try via /bin/sh -c
+		// which has more forgiving exec semantics. On Windows, just surface the error.
+		if (process.platform === "win32") {
+			process.stderr.write(`claude-link: failed to spawn ${claudeBin}: ${err && err.message}\n`);
+			process.exit(1);
+		}
+		try {
+			const cmd = [claudeBin, ...args]
+				.map((a) => `'${String(a).replace(/'/g, `'\\''`)}'`)
+				.join(" ");
+			term = pty.spawn("/bin/sh", ["-c", cmd], spawnOpts);
+			process.stderr.write(
+				`claude-link: direct spawn of ${claudeBin} failed (${err && err.message}); ` +
+					`fell back to /bin/sh -c. If this happens every time, set CLAUDE_LINK_CLAUDE_BIN to a known-good claude path.\n`,
+			);
+		} catch (err2) {
+			process.stderr.write(
+				`claude-link: failed to spawn ${claudeBin}: ${err && err.message}\n` +
+					`  shell fallback also failed: ${err2 && err2.message}\n` +
+					`  Try:  ls -la ${claudeBin}\n` +
+					`        head -1 ${claudeBin}\n` +
+					`        file ${claudeBin}\n` +
+					`  Or set CLAUDE_LINK_CLAUDE_BIN=/full/path/to/claude\n`,
+			);
+			process.exit(1);
+		}
 	}
 
 	const ipcServer = await startIpcServer({
@@ -356,6 +396,15 @@ function startIpcServer({ addr, token, onInject }) {
 						"\x1b[?25h", // cursor on
 				);
 			} catch {}
+
+			// For `claude-link --version`: tack our own version line on after
+			// claude's. Only on success — if claude failed, don't muddy its
+			// error output with our line.
+			if (isVersionMode && exitCode === 0) {
+				try {
+					process.stdout.write(`claude-link ${pkg.version}\n`);
+				} catch {}
+			}
 
 			if (process.stdin.isTTY) {
 				try {
