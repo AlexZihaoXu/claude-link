@@ -187,12 +187,24 @@ function startIpcServer({ addr, token, onInject }) {
 							sock.end();
 							break;
 						}
-						try {
-							onInject(req.bytes, !!req.interrupt);
-							reply({ id: req.id, ok: true });
-						} catch (err) {
-							reply({ id: req.id, ok: false, error: { code: "inject-failed", msg: err.message } });
-						}
+						// onInject may be async (chunked + paced writes). Wait for
+						// it before replying so the MCP-side serialization (await
+						// client.inject(...)) actually serializes — otherwise two
+						// concurrent injects' chunks could interleave on the PTY.
+						Promise.resolve()
+							.then(async () => {
+								try {
+									await onInject(req.bytes, !!req.interrupt);
+									reply({ id: req.id, ok: true });
+								} catch (err) {
+									reply({
+										id: req.id,
+										ok: false,
+										error: { code: "inject-failed", msg: err && err.message },
+									});
+								}
+							})
+							.catch(() => {});
 						break;
 					default:
 						reply({
@@ -300,30 +312,48 @@ function startIpcServer({ addr, token, onInject }) {
 		}
 	}
 
-	const ipcServer = await startIpcServer({
-		addr: ipc.addr,
-		token: ipc.token,
+	// Chunk + drain pacing: Windows ConPTY's input pipe drops oldest bytes when
+	// the consumer (claude) can't drain fast enough. A single term.write() of a
+	// large body silently truncates from the front. Split the body into smaller
+	// writes with a brief delay so the consumer has time to keep up. Also pace
+	// the trailing Enter so it never races the body.
+	const INJECT_CHUNK_BYTES = parseInt(process.env.CLAUDE_LINK_INJECT_CHUNK || "", 10) || 128;
+	const INJECT_CHUNK_DELAY_MS = parseInt(process.env.CLAUDE_LINK_INJECT_DELAY_MS || "", 10) || 10;
+	const INJECT_SUBMIT_DELAY_MS = parseInt(process.env.CLAUDE_LINK_INJECT_SUBMIT_DELAY_MS || "", 10) || 60;
+	const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+	async function injectPaced(bytes) {
 		// Inject simulates the user typing the message and then pressing Enter.
 		// claude's TUI treats a single chunk like `text\r` as a pasted block
 		// with a literal newline, NOT as "typed text followed by Enter" — so
 		// the message lands in the input box without submitting. Split it: write
-		// the body, brief pause to look like user typing, then write the Enter
-		// keystroke separately.
-		onInject: (bytes /*, interrupt */) => {
-			try {
-				const m = /^([\s\S]*?)([\r\n]+)$/.exec(bytes);
-				if (m) {
-					if (m[1]) term.write(m[1]);
-					setTimeout(() => {
-						try {
-							term.write("\r");
-						} catch {}
-					}, 60);
-				} else {
-					term.write(bytes);
+		// the body in paced chunks, brief pause, then write the Enter keystroke.
+		const m = /^([\s\S]*?)([\r\n]+)$/.exec(bytes);
+		const body = m ? m[1] : bytes;
+		const hasSubmit = !!m;
+
+		if (body) {
+			if (body.length <= INJECT_CHUNK_BYTES) {
+				term.write(body);
+			} else {
+				for (let i = 0; i < body.length; i += INJECT_CHUNK_BYTES) {
+					term.write(body.slice(i, i + INJECT_CHUNK_BYTES));
+					if (i + INJECT_CHUNK_BYTES < body.length) {
+						await sleep(INJECT_CHUNK_DELAY_MS);
+					}
 				}
-			} catch {}
-		},
+			}
+		}
+		if (hasSubmit) {
+			await sleep(INJECT_SUBMIT_DELAY_MS);
+			term.write("\r");
+		}
+	}
+
+	const ipcServer = await startIpcServer({
+		addr: ipc.addr,
+		token: ipc.token,
+		onInject: (bytes /*, interrupt */) => injectPaced(bytes),
 	});
 
 	if (process.stdin.isTTY) {
