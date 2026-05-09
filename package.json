@@ -1,6 +1,6 @@
 {
   "name": "claude-link",
-  "version": "0.0.4",
+  "version": "0.0.5",
   "description": "P2P bridge between two Claude Code sessions over WebRTC",
   "type": "module",
   "main": "src/bin/launcher.ts",
@@ -39,7 +39,6 @@
     "@msgpack/msgpack": "^2.8.0",
     "eventemitter3": "^4.0.7",
     "node-datachannel": "^0.32.3",
-    "node-pty": "^1.1.0",
     "peerjs-js-binarypack": "^2.1.0",
     "ws": "^8.20.0"
   },
@@ -49,7 +48,6 @@
     "typescript": "^5.0.0"
   },
   "trustedDependencies": [
-    "node-datachannel",
-    "node-pty"
+    "node-datachannel"
   ]
 }
