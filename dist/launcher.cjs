@@ -282,12 +282,31 @@ function startIpcServer({ addr, token, onInject }) {
 
 	term.onExit(({ exitCode }) => {
 		(async () => {
+			// Restore terminal modes that claude (or any TUI) may have set and
+			// not cleaned up: focus-events, win32-input-mode, mouse modes,
+			// alternate screen, bracketed paste, plus a cursor-on. Without this,
+			// the host terminal can send stray escape responses to bash that
+			// look like garbage at the prompt (";32;100;1;...").
+			try {
+				process.stdout.write(
+					"\x1b[?1004l" + // focus events off
+						"\x1b[?9001l" + // win32-input-mode off
+						"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l" + // mouse modes off
+						"\x1b[?1049l" + // leave alt-screen if still in
+						"\x1b[?2004l" + // bracketed paste off
+						"\x1b[?25h", // cursor on
+				);
+			} catch {}
+
 			if (process.stdin.isTTY) {
 				try {
 					process.stdin.setRawMode(false);
 				} catch {}
 			}
+			// Drop any bytes the terminal queued up (e.g. delayed query
+			// responses) so they don't leak into bash's read buffer.
 			try {
+				process.stdin.removeAllListeners("data");
 				process.stdin.pause();
 			} catch {}
 			try {
